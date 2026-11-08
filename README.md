@@ -1,93 +1,152 @@
 # Jira/Gira Scanner
 
-## Features
-- Scan Jira/Gira tasks with CPU- prefix
-- Generate comprehensive Excel reports with implementation details
-- Track requirements and mappings
-- Central configuration via YAML file
+## 📋 System Description
 
-## Quick Start
+A comprehensive scanner for Jira/Gira tasks with **CPU- prefix** that:
+- Scans Jira tasks matching "CPU-" prefix
+- Extracts implementation details from existing scripts
+- Generates **Excel reports with ALL COLUMNS SIDE-BY-SIDE (horizontal layout)**
 
-### 1. Install dependencies
+---
+
+## 📄 Excel Output Format
+
+All **10 columns displayed horizontally (side-by-side)** for each task:
+
+### Example Excel Structure:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│  Jira-Nummer   │  Jira-Auftraggeber          │  Entwickler         │  Jahr/Monat/Tag-Abgeschlossen  │  Zusammenfassung-Anforderung          │  File-Datum     │  File-Location                         │
+│────────────────│─────────────────────────────│─────────────────────│───────────────────────────────│───────────────────────────────────────│──────────────────│─────────────────────────────────────────│
+│  CPU-1001      │  Max Mustermann             │  Peter Schmidt      │  2024-01-15 14:30:00          │  Monthly Sales Dashboard              │  2023-12-01     │  /scripts/report_monthly_sales.py       │
+│────────────────│─────────────────────────────│─────────────────────│───────────────────────────────│───────────────────────────────────────│──────────────────│─────────────────────────────────────────│
+│  CPU-1002      │  Anna Meier                 │  Thomas Müller      │  2024-01-20 09:15:00          │  ETL Pipeline for Data Warehouse      │  2023-11-15     │  /scripts/etl_pipeline.py               │
+│────────────────│─────────────────────────────│─────────────────────│───────────────────────────────│───────────────────────────────────────│──────────────────│─────────────────────────────────────────│
+│  CPU-1003      │  Lisa Schmidt               │  Michael Weber      │  Open                         │  API Performance Optimization         │  2024-01-25     │  /scripts/api_optimization.py            │
+└────────────────│─────────────────────────────│─────────────────────│───────────────────────────────│───────────────────────────────────────│──────────────────│─────────────────────────────────────────┘
+```
+
+**ALL COLUMNS ARE HORIZONTAL** (Side-by-Side Layout)
+
+---
+
+## 📄 Excel Columns (All Horizontal)
+
+| Column (#) | Column Name       | Description                  | Format                   |
+|------------|-------------------|------------------------------|--------------------------|
+| 1          | Jira-Nummer       | Task ID                      | CPU-1001                |
+| 2          | Jira-Auftraggeber | Requester/Owner              | Max Mustermann          |
+| 3          | Entwickler        | Assigned Developer           | Peter Schmidt           |
+| 4          | Year/Month/Day    | Completion Date              | 2024-01-15 14:30:00     |
+| 5          | Summary           | Task Summary/Requirement     | Monthly Sales Dashboard |
+| 6          | File Date         | Created Date                 | 2023-12-01              |
+| 7          | File-Location     | Script file path             | /scripts/report.py      |
+| 8          | Technologies      | Used technologies/libraries  | pandas, mysql, requests |
+| 9          | Status            | Task Status                  | Open/Closed/Pending     |
+| 10         | Priority          | Task Priority                | High/Medium/Low         |
+
+---
+
+## 🚀 Quick Start
+
+### 1. Install Dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
 ### 2. Configure
-Update `config.yaml` with your Jira/Gira credentials.
-
-### 3. Generate Report
-```bash
-python3 main.py
-```
-
-## Excel Report Columns
-
-The generated Excel file includes:
-- **Jira-Nummer**: CPU-XXXXXXXX (Task ID)
-- **Jira Auftraggeber**: Requester/Demanding party
-- **Entwickler**: Assigned developer
-- **Jahr/Monat/Tag Abgeschlossen**: Completion date (YYYY-MM-DD HH:MM:SS)
-- **Zusammenfassung Anforderung**: Complete task summary
-- **Filedatum**: Date when task/file was created
-- **File Location**: Script file path in repository
-- **Verwendete Technologien**: Technologies/imports used
-- **Status**: Current task status
-- **Priorität**: Priority level (High/Medium/Low)
-
-## Configuration
-
-See `config.yaml` for all available options:
-
-### Server Configuration
+Edit `config.yaml`:
 ```yaml
 server:
   url: "https://your-jira-server.com"
-```
 
-### API Authentication
-```yaml
 api:
   token: "your_api_token"
-```
 
-### Scripts Path
-```yaml
+project:
+  key: "CPU"  # Project key for filtering
+
 scripts:
-  base_path: "/path/to/scripts/"
-  extensions: [".py", ".sh", ".sql", ".js"]
-```
+  base_path: "/home/user1/work/jirascanner/scripts/"
 
-### Excels Export
-```yaml
 excel:
   output_path: "/home/user1/work/jirascanner/output/"
-  datetime_format: "%Y-%m-%d %H:%M:%S"
 ```
 
-## Jira Task Prefix
-
-The scanner filters for tasks with the **CPU-** prefix:
-- Matching: `CPU-1001`, `CPU-2024-001`
-- Searching: Task summary/description contains "CPU-"
-
-## Usage Examples
-
-### Scan Current Directory
+### 3. Generate Report
 ```bash
-python main.py
+cd /home/user1/work/jirascanner
+python3 main.py
 ```
 
-### Scan Custom Path
-```bash
-python main.py --scripts /custom/path --output /custom/output
+---
+
+## 📊 Excel Report Features
+
+### 1. **Horizontal Layout** (All Columns Side-by-Side)
+All 10 columns display horizontally across the page (one row per task)
+
+### 2. **Auto-Styling**:
+- Header: Blue background (4472C4), white text, bold
+- Borders: Thin black borders around each cell
+- Column widths: Optimized for content
+- Wrap text: Enabled for long descriptions
+
+### 3. **Column Specific Formatting**:
+- **Jira-Nummer**: Center-aligned, width 20
+- **Jira-Auftraggeber**: Left-aligned, width 25
+- **Entwickler**: Left-aligned, width 25
+- **Date**: Left-aligned, width 25
+- **Summary**: Left-aligned, width 60 (wrapped)
+- **File-Date**: Left-aligned, width 20
+- **File-Location**: Left-aligned, width 50 (wrapped)
+- **Technologies**: Left-aligned, width 60 (wrapped)
+- **Status**: Center-aligned, width 15
+- **Priority**: Center-aligned, width 15
+
+### 4. **File Name Format**:
+```
+jira_report_YYYY_MM_DD.xlsx
+```
+Example: `jira_report_2024_01_15.xlsx`
+
+---
+
+## 📂 Output Files
+
+```
+/home/user1/work/jirascanner/output/
+├── jira_report_2024_01_15.xlsx   # Excel Report (all columns horizontal)
+└── jira_report_2024_01_15.csv    # CSV backup (optional, auto-generated)
 ```
 
-## Output
+---
+
+## 🔍 CPU- Prefix Filtering
+
+The scanner automatically filters tasks containing **CPU-**:
+
+**Matching Tasks:**
+- `CPU-1001`
+- `CPU-2024-001`
+- `CPU-2024Q1-001`
+
+**Non-Matching:**
+- `TASK-123`
+- `REPORT-456`
+- `JIRA-1000`
+
+---
+
+## 📈 Example Output Snippet
+
+When running `python3 main.py`, you'll see:
 
 ```
 ======================================================================
-🔍 Jira/Gira Scanner - CPU- Task Report Generator
+🔍 JIRA/GIRA SCANNER - CPU- Task Report Generator
+Excel Export: ALL COLUMNS SIDE-BY-SIDE (Horizontal Layout)
 ======================================================================
 
 📋 Searching Jira tasks with prefix: CPU-
@@ -96,23 +155,35 @@ python main.py --scripts /custom/path --output /custom/output
 🔍 Scanning scripts for implementation details...
 ✅ Generated report for 15 tasks
 
-💾 Exporting to Excel...
-✅ Excel report saved: /home/user1/work/jirascanner/output/jira_report_2024_01_15.xlsx
+💾 Exporting to Excel (ALL COLUMNS SIDE-BY-SIDE)...
+✅ Excel Report with ALL COLUMNS SIDE-BY-SIDE saved: /home/user1/work/jirascanner/output/jira_report_2024_01_15.xlsx
 ======================================================================
-✓ Report exported: /home/user1/work/jirascanner/output/jira_report_2024_01_15.xlsx
+✓ Report Excel saved: /home/user1/work/jirascanner/output/jira_report_2024_01_15.xlsx
 ======================================================================
 ```
 
-## Dependencies
+---
 
+## 🛠️ Dependencies
+
+```yaml
+- pyyaml >= 6.0
+- requests >= 2.28.0
+- openpyxl >= 3.1.0
+- lxml >= 4.7.0
+- pandas >= 1.5.0
 ```
-pyyaml>=6.0
-requests>=2.28.0
-openpyxl>=3.1.0
-lxml>=4.7.0
-pandas>=1.5.0
-```
 
-## License
+---
 
-MIT License
+## 📋 License
+
+MIT License - Free to use and modify
+
+---
+
+## 🔗 Quick Links
+
+- **Documentation**: [JIRA_SCANNER_PROMPT.md](./JIRA_SCANNER_PROMPT.md)
+- **Configuration**: [config.yaml](./config.yaml)
+- **System Prompt**: [JIRA_SCANNER_PROMPT.md](./JIRA_SCANNER_PROMPT.md)

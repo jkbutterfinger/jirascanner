@@ -27,6 +27,7 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 # Configuration Path
 CONFIG_PATH = Path(__file__).parent / "config.yaml"
@@ -100,7 +101,7 @@ class JiraClient:
         """Convert priority name"""
         priority_map = {
             "blocking": "Blocker",
-            "critical": "Critical", 
+            "critical": "Critical",
             "high": "High",
             "medium": "Medium",
             "low": "Low",
@@ -166,12 +167,12 @@ class ScriptScanner:
             info["jira_refs"] = list(set(re.findall(r'CPU-\d+', content)))
             
             # Technologies used (imports)
-            info["technologies"] = []
-            for match in re.findall(r'^import\s+(\w+(\.\w+)*)', content, re.MULTILINE):
-                if match not in exc["technologies"]:
-                    info["technologies"].append(match.split('.')[0])
-            
-            info["technologies"] = list(set(exc["technologies"]))
+            tech_imports = re.findall(r'^(?:import\s+from\s+(\w+)|from\s+(\w+)', content, re.MULTILINE)
+            for match in tech_imports:
+                if match[0] and match[0] not in info["technologies"]:
+                    info["technologies"].append(match[0])
+                elif match[1] and match[1] not in info["technologies"]:
+                    info["technologies"].append(match[1])
             
             # KPI/Dashboard mentions
             info["kpi_reports"] = list(set(re.findall(r'[kK]pi|Dashboard|Report|Metric', content, re.IGNORECASE)))
@@ -208,80 +209,168 @@ class ScriptScanner:
 
 
 class ExcelExporter:
-    """Export report to Excel"""
+    """Export report to Excel with horizontal layout (all columns side-by-side)"""
     
     def __init__(self):
         self.output_dir = "/home/user1/work/jirascanner/output/"
         os.makedirs(self.output_dir, exist_ok=True)
     
     def export(self, data: List[Dict]) -> str:
-        """Export to Excel with proper formatting"""
+        """
+        Export to Excel with ALL COLUMNS SIDE-BY-SIDE (horizontal layout)
+        Each row represents one Jira task, all 10 columns next to each other
+        """
         if not data:
             print("⚠️  No data to export")
             return ""
         
         wb = Workbook()
         ws = wb.active
-        ws.title = "Jira Tasks Report"
+        ws.title = "Jira-Task-Report-Excel"
         
-        # Headers row
-        headers = [
-            "Jira-Nummer",
-            "Jira Auftraggeber", 
-            "Entwickler",
-            "Jahr/Monat/Tag Abgeschlossen",
-            "Zusammenfassung Anforderung",
-            "Filedatum",
-            "File Location",
-            "Verwendete Technologien",
-            "Status",
-            "Priorität"
+        # Define all column headers (horizontal layout - all in one row)
+        horizontal_headers = [
+            {"value": "Jira-Nummer", "width": 20},
+            {"value": "Jira-Auftraggeber", "width": 25},
+            {"value": "Entwickler", "width": 25},
+            {"value": "Jahr/Monat/Tag-Abgeschlossen", "width": 25},
+            {"value": "Zusammenfassung-Anforderung", "width": 60},
+            {"value": "File-Datum", "width": 20},
+            {"value": "File-Location", "width": 50},
+            {"value": "Verwendete-Technologien", "width": 60},
+            {"value": "Status", "width": 15},
+            {"value": "Priorität", "width": 15},
         ]
         
-        for col, header in enumerate(headers, 1):
-            cell = ws.cell(row=1, column=col, value=header)
-            cell.font = type('obj', (object,), {'bold': True})()
-            cell.fill = type('obj', (object,), {'fill_type': 'solid', 
-                'start_color': '4472C4'})()
-            cell.value = header
+        # Set header cell styles
+        header_font = Font(bold=True, color="FFFFFF", size=11)
+        header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+        header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        header_border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='thin'),
+            bottom=Side(style='thin'),
+            color="000000"
+        )
         
-        # Empty line separator
+        # Set column widths for horizontal layout
+        column_widths = [20, 25, 25, 25, 60, 20, 50, 60, 15, 15]
+        
+        # Write headers (horizontal - all side-by-side in row 1)
+        for col_idx, header_info in enumerate(horizontal_headers, 1):
+            cell = ws.cell(row=1, column=col_idx, value=header_info["value"])
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = header_alignment
+            cell.border = header_border
+            ws.column_dimensions[chr(64 + col_idx)].width = column_widths[col_idx - 1]
+        
+        # Empty separator row
         ws.cell(row=2, column=1, value="")
+        ws.cell(row=2, column=2, value="")
+        ws.cell(row=2, column=3, value="")
+        ws.cell(row=2, column=4, value="")
+        ws.cell(row=2, column=5, value="")
+        ws.cell(row=2, column=6, value="")
+        ws.cell(row=2, column=7, value="")
+        ws.cell(row=2, column=8, value="")
+        ws.cell(row=2, column=9, value="")
+        ws.cell(row=2, column=10, value="")
         
-        # Data rows
+        # Define data row cell styles
+        data_font = Font(size=10)
+        data_alignment = Alignment(horizontal="left", vertical="center")
+        data_border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='thin'),
+            bottom=Side(style='thin'),
+            color="000000"
+        )
+        normal_fill = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
+        
+        # Write data rows (all columns side-by-side for each task)
         for row_idx, row_data in enumerate(data, 3):
-            ws.cell(row=row_idx, column=1, value=row_data.get("Jira-Nummer", ""), border=type('obj', (object,), {'border': True, 'style': 'thin'})())
-            ws.cell(row=row_idx, column=2, value=row_data.get("Jira Auftraggeber", ""))
+            # Column 1: Jira-Nummer
+            ws.cell(row=row_idx, column=1, value=row_data.get("Jira-Nummer", ""))
+            
+            # Column 2: Jira-Auftraggeber
+            ws.cell(row=row_idx, column=2, value=row_data.get("Jira-Auftraggeber", ""))
+            
+            # Column 3: Entwickler
             ws.cell(row=row_idx, column=3, value=row_data.get("Entwickler", ""))
-            ws.cell(row=row_idx, column=4, value=row_data.get("Jahr/Monat/Tag Abgeschlossen", ""))
-            ws.cell(row=row_idx, column=5, value=row_data.get("Zusammenfassung Anforderung", ""))
-            ws.cell(row=row_idx, column=6, value=row_data.get("Filedatum", ""))
-            ws.cell(row=row_idx, column=7, value=row_data.get("File Location", ""))
-            ws.cell(row=row_idx, column=8, value=row_data.get("Verwendete Technologien", ""))
+            
+            # Column 4: Jahr/Monat/Tag-Abgeschlossen
+            ws.cell(row=row_idx, column=4, value=row_data.get("Jahr/Monat/Tag-Abgeschlossen", ""))
+            
+            # Column 5: Zusammenfassung-Anforderung
+            ws.cell(row=row_idx, column=5, value=row_data.get("Zusammenfassung-Anforderung", ""))
+            
+            # Column 6: File-Datum
+            ws.cell(row=row_idx, column=6, value=row_data.get("File-Datum", ""))
+            
+            # Column 7: File-Location
+            ws.cell(row=row_idx, column=7, value=row_data.get("File-Location", ""))
+            
+            # Column 8: Verwendete-Technologien
+            ws.cell(row=row_idx, column=8, value=row_data.get("Verwendete-Technologien", ""))
+            
+            # Column 9: Status
             ws.cell(row=row_idx, column=9, value=row_data.get("Status", ""))
+            
+            # Column 10: Priorität
             ws.cell(row=row_idx, column=10, value=row_data.get("Priorität", ""))
+            
+            # Apply border to all cells in this row
+            for col in range(1, 11):
+                cell = ws.cell(row=row_idx, column=col)
+                cell.font = data_font
+                cell.fill = normal_fill
+                cell.alignment = data_alignment
+                cell.border = data_border
         
-        # Apply borders
-        ws.border = type('obj', (object,), {
-            'top': {'style': 'thin'},
-            'right': {'style': 'thin'}, 
-            'bottom': {'style': 'thin'},
-            'left': {'style': 'thin'}
-        })()
+        # Add total row at bottom
+        ws.cell(row=len(data) + 3, column=1, value="GESAMT")
+        ws.cell(row=len(data) + 3, column=10, value="=-")
         
-        # Save
-        filename = self.output_dir + f"jira_report_{datetime.now().strftime('%Y-%m-%d').replace('-', '_')}.xlsx"
-        wb.save(filename)
-        print(f"✅ Excel report saved: {filename}")
-        return filename
+        # Save workbook
+        if "{YYYY}_{MM}_{DD}" in str(self.output_dir):
+            output_filename = datetime.now().strftime("jira_report_%Y_%m_%d.xlsx")
+        else:
+            output_filename = datetime.now().strftime("jira_report_%Y_%m_%d.xlsx")
+        
+        output_path = os.path.join(self.output_dir, output_filename)
+        wb.save(output_path)
+        print(f"✅ Excel Report with ALL COLUMNS SIDE-BY-SIDE saved: {output_path}")
+        return output_path
+    
+    def export_simple(self, data: List[Dict]) -> str:
+        """Simple Excel export for debugging"""
+        print("Simple export layout (all columns side-by-side):")
+        print("-" * 180)
+        for row in data:
+            line = "| " + row.get("Jira-Nummer", "") + " | "
+            line += row.get("Jira-Auftraggeber", "") + " | "
+            line += row.get("Entwickler", "") + " | "
+            line += row.get("Jahr/Monat/Tag-Abgeschlossen", "") + " | "
+            line += row.get("Zusammenfassung-Anforderung", "")[:50] + " | "
+            line += row.get("File-Datum", "") + " | "
+            line += row.get("File-Location", "")[:40] + " | "
+            line += row.get("Verwendete-Technologien", "")[:40] + " | "
+            line += row.get("Status", "") + " | "
+            line += row.get("Priorität", "") + " |"
+            print(line)
+        print("-" * 180)
+        return ""
 
 
 def main():
     """Main execution"""
-    print("=" * 70)
-    print("🔍 Jira/Gira Scanner - CPU- Task Report Generator")
-    print("Excel Export with complete task information")
-    print("=" * 70)
+    print("=" * 80)
+    print("🔍 JIRA/GIRA SCANNER - CPU- Task Report Generator")
+    print("Excel Export: ALLE KOLUMNEN NEBENEINANDER (Side-by-Side Layout)")
+    print("=" * 80)
     
     # Initialize
     jira_client = JiraClient()
@@ -293,7 +382,18 @@ def main():
     
     if not tasks:
         print("⚠️  No CPU- tasks found. Creating empty template...")
-        template_data = [{"Jira-Nummer": "CPU-", "Zusammenfassung": "No data"}]
+        template_data = [{
+            "Jira-Nummer": "CPU-",
+            "Jira-Auftraggeber": "",
+            "Entwickler": "",
+            "Jahr/Monat/Tag Abgeschlossen": "Pending",
+            "Zusammenfassung Anforderung": "No data",
+            "File-Datum": "",
+            "File-Location": "",
+            "Verwendete-Technologien": "",
+            "Status": "Open",
+            "Priorität": "Medium"
+        }]
     else:
         print(f"✅ Found {len(tasks)} CPU- tasks\n")
         
@@ -306,14 +406,14 @@ def main():
             if impl:
                 report.append({
                     "Jira-Nummer": task.key,
-                    "Jira Auftraggeber": task.reporter or "",
+                    "Jira-Auftraggeber": task.reporter or "",
                     "Entwickler": task.assignee or "",
-                    "Jahr/Monat/Tag Abgeschlossen": 
+                    "Jahr/Monat/Tag-Abgeschlossen": 
                         task.resolved or "Pending",
-                    "Zusammenfassung Anforderung": task.summary,
-                    "Filedatum": task.created or "",
-                    "File Location": impl.get("path", ""),
-                    "Verwendete Technologien": 
+                    "Zusammenfassung-Anforderung": task.summary or "",
+                    "File-Datum": task.created or "",
+                    "File-Location": impl.get("path", ""),
+                    "Verwendete-Technologien": 
                         " | ".join(impl.get("technologies", [])[:3]) or "",
                     "Status": task.status or "Open",
                     "Priorität": task.priority
@@ -321,25 +421,25 @@ def main():
             else:
                 report.append({
                     "Jira-Nummer": task.key,
-                    "Jira Auftraggeber": task.reporter or "",
+                    "Jira-Auftraggeber": task.reporter or "",
                     "Entwickler": task.assignee or "",
-                    "Jahr/Monat/Tag Abgeschlossen": "Pending",
-                    "Zusammenfassung Anforderung": task.summary or "",
-                    "Filedatum": task.created or "",
-                    "File Location": "Not found",
-                    "Verwendete Technologien": "",
+                    "Jahr/Monat/Tag-Abgeschlossen": "Pending",
+                    "Zusammenfassung-Anforderung": task.summary or "",
+                    "File-Datum": task.created or "",
+                    "File-Location": "Not found",
+                    "Verwendete-Technologien": "",
                     "Status": task.status or "Missing",
                     "Priorität": task.priority
                 })
         
         print(f"✅ Generated report for {len(report)} tasks")
     
-    print("\n💾 Exporting to Excel...")
+    print("\n💾 Exporting to Excel (ALL COLUMNS SIDE-BY-SIDE)...")
     filename = exporter.export(report if report else [{"Jira-Nummer": "N/A"}])
     
-    print("=" * 70)
-    print(f"✓ Report exported: {filename}")
-    print("=" * 70)
+    print("=" * 80)
+    print(f"✓ Report Excel saved: {filename}")
+    print("=" * 80)
 
 
 if __name__ == "__main__":
