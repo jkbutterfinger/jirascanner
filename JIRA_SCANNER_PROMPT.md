@@ -65,59 +65,6 @@ SYSTEM SETUP
     Excel Output:
       output_path: "/home/user1/work/jirascanner/output/"
 
-   c) Speichere config.yaml
-
-3. START DES SYSTEMS:
-
-   python3 main.py
-   
-   oder
-   
-   bash run.sh
-
-================================================================================
-JIRA TASK FILTERING
-================================================================================
-
-SYSTEMATISCHES FILTERING:
-
-Prefix: "CPU-"       (Erzwingt für alle Tasks)
-Project Key: CPU     (Standard project)
-
-MATCHING-MUSTER:
-✓ CPU-1001
-✓ CPU-2024-001
-✓ CPU-2024Q1-001
-
-NON MATCHING BEISPIELE:
-✗ TASK-123
-✗ REPORT-456
-✗ JIRA-1000
-
-================================================================================
-EXCEL BEREICHS-STRUKTUR
-================================================================================
-
-Generierter Excel-Report enthält folgende Spalten:
-
-1. Jira-Nummer          | CPU-XXXXXXXX (Task ID)
-2. Jira Auftraggeber    | Wer verlangt die Task
-3. Entwickler           | Zugeteilter Entwicklers
-4. Jahr/Monat/Tag Abgeschlossen | YYYY-MM-DD HH:MM:SS
-5. Zusammenfassung Anforderung | Taskbeschreibung
-6. Filedatum            | Task-Erstellungsdatum
-7. File Location        | Absoluter Pfad Skript
-8. Verwendete Technologien   | Technologien/Importe
-9. Status               | Aktuell Status (Open/Closed)
-10. Priorität           | High/Medium/Low
-
-================================================================================
-EXAMPEL-OUTPUT
-================================================================================
-
-Excel Output Beispiel:
-
-        Jira-Nummer     | Jira Auftraggeber       | Entwickler
 CPU-1001   | MAX Mustermann        | HELG Schmidt      | 2024-01-15 09:30:00
 CPU-1002   | ANA Meier             | TOM Mueller      | 2024-01-15 10:45:00
 
@@ -232,4 +179,23 @@ Documentation: https://github.com/user/jirascanner#readme
 
 ================================================================================
 END OF SYSTEM PROMPT
+================================================================================
+================================================================================
+EXCEL OUTPUT FORMAT (CORRECTED)
+================================================================================
+
+ALL 10 COLUMNS DISPLAYED WITH SIDE-BY-SIDE (HORONTAL LAYOUT):
+
+┌─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│  Jira-Nummer   │  Jira-Auftraggeber          │  Entwickler         │  Jahr/Monat/Tag            │  Zusammenfassung-Anforderung          │  File-Datum     │
+│────────────────│─────────────────────────────│─────────────────────│────────────────────────────│───────────────────────────────────────│──────────────────│
+│  CPU-1001      │  Max Mustermann             │  Peter Schmidt      │  2024-01-15 14:30:00       │  Monthly Sales Dashboard              │  2023-12-01     │
+│────────────────│─────────────────────────────│─────────────────────│────────────────────────────│───────────────────────────────────────│──────────────────│
+│  CPU-1002      │  Anna Meier                 │  Thomas Müller      │  2024-01-20 09:15:00       │  ETL Pipeline for Data Warehouse      │  2023-11-15     │
+└────────────────│─────────────────────────────│─────────────────────│────────────────────────────│───────────────────────────────────────│──────────────────┘
+
+Note: ALL COLUMNS ARE NEBENEINANDER (Side-by-Side Layout)
+
+================================================================================
+END OF FILE
 ================================================================================
