@@ -1,96 +1,82 @@
-# Jira/Gira Scanner Configuration
-# --------------------------------
+# Jira/Gira Scanner – Konfiguration
+# ---------------------------------------------------------------------------
+# Diese Datei wird von config.py geladen. Fehlende Werte werden durch
+# Defaults ergänzt. Tokens können alternativ über Umgebungsvariablen gesetzt
+# werden (siehe unten), damit keine Secrets in Git landen.
+#
+# Umgebungsvariablen (haben Vorrang):
+#   JIRA_URL, JIRA_API_TOKEN, JIRA_PROJECT_KEY,
+#   JIRA_SCRIPT_PATH, JIRA_OUTPUT_PATH, JIRA_LOG_LEVEL
+# ---------------------------------------------------------------------------
 
-# Server Configuration
+# Jira-Server
 server:
-  url: "https://your-jira-server.com"
+  url: "https://your-jira-server.com"   # z. B. https://jira.example.com
   protocol: "https"
   port: 443
 
-# API Authentication
+# API-Authentifizierung (Bearer-Token für Jira Cloud/Server)
 api:
-  token: ""
-  username: ""
-  password: ""
-  auth_type: "token"  # token, username/password
+  token: ""                # besser: JIRA_API_TOKEN setzen
+  auth_type: "token"       # token
+  cors_origins:            # Origins für die FastAPI-API
+    - "http://localhost:8000"
+    - "http://127.0.0.1:8000"
 
-# Jira Project Configuration
+# Jira-Projekt
 project:
-  key: "CPU"         # Projektschlüssel
+  key: "CPU"               # Projektschlüssel; Task-Keys beginnen mit "CPU-"
   name: "Capacity Planning"
-  space_key: "Y"      # Confluence Space Key
-  jql: ""
+  jql: ""                  # optional: eigene JQL (überschreibt project.key)
 
-# Data Storage
+# Datenablage
 storage:
-  inventory_path: "/home/user1/work/jirascanner/inventory/"
+  inventory_path: "inventory"
   inventory_file: "inventory.json"
   suggestions_file: "suggestions.json"
   jira_cache: "jira_data/tasks.json"
 
-# Scripts Inventory
+# Zu scannende Skripte
 scripts:
-  base_path: "/home/user1/work/jirascanner/scripts/"
+  base_path: "scripts"
   extensions: [".py", ".sh", ".sql", ".js", ".ts"]
   include_subdirectories: true
+  exclude:                 # nicht als Report-Skripte scannen
+    - "__init__.py"
+    - "script_inventory.py"
 
-# Jira Task Filters
+# Task-Filter
 filters:
-  prefix: "CPU-"      # Nur CPU- Tasks
-  min_priority: "medium"  # Blocker, Critical, High, Medium, Low
-  statuses:
-    - "open"
-    - "in progress"
-    - "done"
-  exclude_keywords: ["bug", "technical debt", "cleanup"]
+  prefix: "CPU-"           # Key-Prefix (clientseitig geprüft)
+  min_priority: "medium"
+  statuses: ["open", "in progress", "done"]
+  exclude_keywords: []
 
-# Matching Rules
-matching:
-  enable_auto_match: true
-  min_similar_score: 0.7
-  match_fields:
-    - "description"
-    - "title"
-    - "summary"
-    - "acceptance criteria"
-
-# Performance
+# Performance / Jira-Requests
 performance:
-  max_results: 1000
-  parallel_requests: 10
-  timeout: 30
+  max_results: 1000        # Obergrenze über alle Seiten
+  timeout: 30              # Sekunden pro Request
   retry_attempts: 3
 
-# Excel Report Configuration
+# Excel-/CSV-Export
 excel:
-  output_path: "/home/user1/work/jirascanner/output/"
-  output_filename: "jira_report_{YYYY}-{MM}-{DD}.xlsx"
+  output_path: "output"
+  output_filename: "jira_report_{YYYY}_{MM}_{DD}.xlsx"
   include_headers: true
+  include_csv: true        # zusätzlich jira_report_YYYY_MM_DD.csv schreiben
   datetime_format: "%Y-%m-%d %H:%M:%S"
-  sheet_names:
-    - "Requirements"
-    - "Implementations"
-    - "Gaps"
+  sheet_name: "Jira-Task-Report"
 
-# Confluence Integration
+# Logging
+logging:
+  level: "INFO"            # DEBUG, INFO, WARNING, ERROR
+  output_file: "logs/jira_scanner.log"
+  max_size_mb: 10
+  backup_count: 3
+
+# Confluence (derzeit nicht implementiert – nur für spätere Erweiterung)
 confluence:
   enabled: false
   base_url: "https://your-confluence-server.com"
   api_token: ""
   attachments_path: "jira_data/attachments/"
-
-# Logging
-logging:
-  level: "INFO"
-  output_file: "logs/jira_scanner.log"
-  max_size_mb: 100
-  backup_count: 5
-
-# Authentication
-auth:
-  domain: "your-domain.com"
-  proxy_enabled: false
-  proxy_host: ""
-  proxy_port: ""
-  proxy_username: ""
-  proxy_password: ""

@@ -4,31 +4,33 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jira-scanner"
-version = "1.0.0"
-description = "Jira/Gira Task Scanner with Excel Export for CPU- prefix tasks"
+version = "1.1.0"
+description = "Jira/Gira Task Scanner with Excel/CSV export for CPU- prefix tasks"
 readme = "README.md"
-requires-python = ">=3.8"
-license = {text = "MIT"}
-authors = [
-    {name = "Jira Scanner Team", email = "team@example.com"}
-]
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Jira Scanner Team" }]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "pyyaml>=6.0",
+    "PyYAML>=6.0",
     "requests>=2.28.0",
     "openpyxl>=3.1.0",
-    "lxml>=4.7.0",
-    "pandas>=1.5.0",
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "pydantic>=2.5.0",
+    "python-dotenv>=1.0.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
+    "httpx>=0.24.0",
+    "ruff>=0.4.0",
 ]
 
 [project.urls]
@@ -37,4 +39,25 @@ Documentation = "https://github.com/user/jira-scanner#readme"
 
 [project.scripts]
 jira-scan = "main:main"
-jira-report = "main:main"
+jira-api = "api.suggestion_api:main"
+
+[tool.setuptools]
+py-modules = ["main", "config"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["api*", "scanner*", "scripts*"]
+namespaces = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "B"]
+# FastAPI benötigt Funktionsaufrufe (Query/Depends) in Default-Argumenten.
+ignore = ["B008"]

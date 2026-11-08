@@ -1,61 +1,58 @@
-# 虚拟环境
+# Virtuelle Umgebungen
 venv/
 env/
 .venv/
 ENV/
 
-# Python 缓存
+# Python-Caches
 __pycache__/
 *.py[cod]
 *$py.class
 *.pyo
 .Python
 *.so
-.PKG-DEB
 *.egg-info/
 dist/
 build/
 
-# Jira/Gira 数据存储
-inventory/inventory.json
-inventory/suggestions.json
-inventory/*.json
+# Jira/Gira-Daten (können Tokens/vertrauliche Daten enthalten)
+inventory/
 jira_data/
 confluence_data/
+config.local.yaml
 
-# 环境配置文件
+# Umgebungs- und Secret-Dateien
 .env
 .env.local
 .env.*.local
 *.token
 *.credentials
 
-# IDE 配置
+# IDE
 .idea/
 .vscode/
 *.swp
 *.swo
 *~
 
-# OS
+# Betriebssystem
 .DS_Store
 Thumbs.db
 
-# 临时文件
+# Temporäre Dateien
 *.tmp
 *.temp
-*~
 *.log
 
-# pytest
+# Tests / Linting
 .pytest_cache/
+.ruff_cache/
 .coverage
 htmlcov/
 
-# Ausgabe-Verzeichnisse
+# Ausgaben
 output/*.xlsx
 output/*.csv
 
 # Logs
 logs/*.log
-*.log

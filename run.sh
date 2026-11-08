@@ -1,75 +1,68 @@
 #!/bin/bash
+# Jira/Gira Scanner – Startskript
+# ---------------------------------------------------------------------------
+# Prüft Voraussetzungen, legt Ausgabeordner an und startet main.py.
+# Alle Argumente werden an main.py weitergegeben, z. B.:
+#   ./run.sh --dry-run
+#   ./run.sh --prefix CPU- --verbose
+# ---------------------------------------------------------------------------
 
-# Jira Scanner Main Script
-# =====================================================
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR" || exit 1
+
+PYTHON="${PYTHON:-python3}"
 
 echo "=============================================="
 echo "🔍 JIRA/GIRA SCANNER"
-echo "CPU- Task Scanner with Excel Export"
+echo "CPU-Task-Scanner mit Excel-/CSV-Export"
 echo "=============================================="
 echo ""
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$SCRIPT_DIR"
-
-# Check if main.py exists
-if [[ ! -f "main.py" ]]; then
-    echo "❌ Error: main.py not found!"
-    echo ""
-    echo "Please install dependencies first:"
-    echo "   pip install -r requirements.txt"
+if ! command -v "$PYTHON" >/dev/null 2>&1; then
+    echo "❌ Fehler: $PYTHON wurde nicht gefunden."
     exit 1
 fi
 
-# Check if config.yaml exists
-if [[ ! -f "config.yaml" ]]; then
-    echo "⚠️  Warning: config.yaml not found!"
+# Abhängigkeiten prüfen
+if ! "$PYTHON" -c "import yaml, requests, openpyxl" >/dev/null 2>&1; then
+    echo "❌ Fehlende Abhängigkeiten."
     echo ""
-    echo "Creating default config.yaml..."
-    cat > config.yaml << 'CONFIGEOF'
-# Jira/Gira Scanner Configuration
-server:
-  url: "https://your-jira-server.com"
-  protocol: "https"
-  
-api:
-  token: ""
-  
-project:
-  key: "CPU"
-  
-scripts:
-  base_path: "/home/user1/work/jirascanner/scripts/"
-  extensions: [".py", ".sh", ".sql"]
-  
-excel:
-  output_path: "/home/user1/work/jirascanner/output/"
-  output_filename: "jira_report_{YYYY}_{MM}_{DD}.xlsx"
+    echo "Bitte zuerst installieren:"
+    echo "   $PYTHON -m venv .venv"
+    echo "   source .venv/bin/activate"
+    echo "   pip install -r requirements.txt"
+    echo ""
+    exit 1
+fi
 
-logging:
-  level: "INFO"
-CONFIGEOF
-    echo "✅ Created default config.yaml"
+# Konfiguration anlegen, falls sie fehlt
+if [[ ! -f "config.yaml" ]]; then
+    echo "⚠️  config.yaml fehlt – Defaults aus config.py werden verwendet."
+    echo "   Für eine echte Konfiguration: config.yaml anlegen (siehe README)."
     echo ""
 fi
 
-# Run the scanner
-echo "Running Jira Scanner..."
-echo "Looking for tasks with CPU- prefix..."
-echo ""
-python3 main.py
+# Ausgabe- und Logordner
+mkdir -p output logs inventory jira_data
 
-# Check exit code
-if [[ $? -eq 0 ]]; then
+echo "Starte Scanner..."
+echo ""
+
+"$PYTHON" main.py "$@"
+EXIT_CODE=$?
+
+echo ""
+if [[ $EXIT_CODE -eq 0 ]]; then
+    echo "✅ Bericht erfolgreich erzeugt."
     echo ""
-    echo "✅ Report generation completed successfully!"
-    echo ""
-    echo "Output files:"
-    ls -lh output/*.xlsx 2>/dev/null || echo "  (No Excel files found)"
+    echo "Ausgabedateien:"
+    ls -lh output/*.xlsx output/*.csv 2>/dev/null || echo "  (keine Dateien gefunden)"
 else
-    echo ""
-    echo "❌ Report generation failed!"
-    echo "Check error messages above."
+    echo "❌ Berichtserzeugung fehlgeschlagen (Exit-Code $EXIT_CODE)."
+    echo "Details siehe logs/jira_scanner.log"
 fi
 
 echo "=============================================="
+exit $EXIT_CODE

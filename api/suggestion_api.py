@@ -1,342 +1,432 @@
 #!/usr/bin/env python3
-"""
-Suggestion System API - Web Service für Requirements Matching und Gap Analysis
-Buildet auf FastAPI + SQLAlchemy
+"""Suggestion System API – FastAPI-Service für Requirements-Matching.
+
+Stellt Tasks, Script-Inventar, Suggestions und eine einfache Gap-Analyse
+unter dem Prefix ``/api`` bereit und liefert das Dashboard unter ``/`` aus.
+
+Start:
+    python -m api.suggestion_api
+    # oder
+    uvicorn api.suggestion_api:app --reload
 """
 
-import os
+from __future__ import annotations
+
 import json
+import logging
+import os
+import re
+import sys
+import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import List, Dict, Any
-from pydantic import BaseModel, Field
-from fastapi import FastAPI, HTTPException, Depends
-from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-# Models
+import uvicorn
+from fastapi import APIRouter, FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
+
+# Direktaufruf "python api/suggestion_api.py" ermöglichen.
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from config import ROOT, load_config, resolve_path  # noqa: E402
+from scripts.script_inventory import ScriptAnalyzer  # noqa: E402
+
+LOGGER = logging.getLogger("jira_scanner.api")
+CONFIG = load_config()
+
+# --------------------------------------------------------------------------- Models
+
+
 class JiraTask(BaseModel):
-    """Jira Task Model"""
-    key: str = Field(..., description="Task ID z.B. PROJ-345")
-    summary: str = Field(..., description="Task Zusammenfassung")
-    description: str = Field(default="", description="Task Beschreibung")
+    """Jira Task Model."""
+
+    key: str = Field(..., description="Task ID, z. B. CPU-345")
+    summary: str = Field(..., description="Task-Zusammenfassung")
+    description: str = Field(default="", description="Task-Beschreibung")
     status: str = Field(default="open", description="Aktueller Status")
     type: str = Field(default="story", description="Issue Type")
-    project_key: str = Field(default="PROJ", description="Projekt Key")
+    project_key: str = Field(default="CPU", description="Projekt-Key")
     priority: str = Field(default="medium", description="Priorität")
-    jql: str = Field(default="", description="Zugehörige JQL Abfrage")
-    created: str = Field(default="", description="Erstellungs-Datum")
-    requirements: List[Dict[str, Any]] = Field(default=[], description="Extrahierte Anforderungen")
-    confluence_docs: List[str] = Field(default=[], description="Confluence Dokument-Pfade")
+    jql: str = Field(default="", description="Zugehörige JQL-Abfrage")
+    created: str = Field(default="", description="Erstellungsdatum")
+    requirements: List[Dict[str, Any]] = Field(default_factory=list)
+    confluence_docs: List[str] = Field(default_factory=list)
 
 
 class ScriptImplementation(BaseModel):
-    """Implementation Script Model"""
-    file_path: str = Field(..., description="Pfad zur Script-Datei")
-    name: str = Field(..., description="Script Name")
-    lines: int = Field(..., description="Anzahl Zeilen")
-    size_bytes: int = Field(..., description="Größe in Bytes")
-    jira_references: List[str] = Field(default=[], description="Verwiesene Jira-Tasks")
-    kpi_tags: List[str] = Field(default=[], description="Erkannte KPI/Dashboard Tags")
-    database_connections: List[str] = Field(default=[], description="Datenbank-Verbindungen")
-    api_imports: List[str] = Field(default=[], description="Externe API-Aufrufe")
-    complexity: int = Field(default=1, description="Geschätzte Komplexität (1-5)")
+    """Implementation-Script Model."""
+
+    file_path: str
+    name: str
+    lines: int
+    size_bytes: int
+    jira_references: List[str] = Field(default_factory=list)
+    kpi_tags: List[str] = Field(default_factory=list)
+    database_connections: List[str] = Field(default_factory=list)
+    api_imports: List[str] = Field(default_factory=list)
+    complexity: int = 1
 
 
 class Suggestion(BaseModel):
-    """Suggestion Model"""
-    title: str = Field(..., description="Suggestion Titel")
-    description: str = Field(..., description="Beschreibung")
-    task_id: str = Field(..., description="Zugehöriger Jira Task")
-    severity: str = Field(default="medium", description="Schweregrad")
-    category: str = Field(default="feature", description="Kategorie")
-    file_path: Optional[str] = Field(default=None, description="Zugehöriges Script")
+    """Suggestion Model."""
+
+    title: str = Field(..., min_length=1)
+    description: str = Field(..., min_length=1)
+    task_id: str = Field(..., min_length=1)
+    severity: str = Field(default="medium")
+    category: str = Field(default="feature")
+    file_path: Optional[str] = None
 
 
 class GapAnalysis(BaseModel):
-    """Gap Analysis Model"""
-    task_key: str = Field(..., description="Zu analysierender Task")
-    summary: str = Field(..., description="Task Zusammenfassung")
-    has_implementation: bool = Field(..., description="Hat Implementation")
-    implementation_path: Optional[str] = Field(default=None, description="Pfad zur Implementation")
-    missing_requirements: List[str] = Field(default=[], description="Fehlende Anforderungen")
-    completion_percentage: float = Field(default=0, description="Abgeschlossener Anteil %")
+    """Gap-Analyse-Ergebnis."""
+
+    task_key: str
+    summary: str = ""
+    has_implementation: bool
+    implementation_path: Optional[str] = None
+    missing_requirements: List[str] = Field(default_factory=list)
+    completion_percentage: float = 0
 
 
 class Requirement(BaseModel):
-    """Requirement Model"""
-    id: str = Field(default="", description="Anforderungs-ID")
-    task_id: str = Field(..., description="Zugehöriger Task")
-    description: str = Field(..., description="Anforderungsbeschreibung")
-    type: str = Field(default="functional", description="Typ")  # functional, technical, non-functional
-    acceptance_criteria: Optional[str] = Field(default=None, description="Akzeptanzkriterien")
-    priority: str = Field(default="medium", description="Priorität")
+    """Requirement Model."""
+
+    id: str = ""
+    task_id: str
+    description: str
+    type: str = "functional"
+    acceptance_criteria: Optional[str] = None
+    priority: str = "medium"
 
 
-# Database Interface (vereinfacht)
-class SuggestionDB:
-    """In-Memory Datenbank für Suggestions"""
-    
-    def __init__(self, db_path: str):
-        self.db_path = db_path
+# --------------------------------------------------------------------------- Storage
+
+
+class SuggestionStore:
+    """Kleine JSON-Datenbank für Tasks und Suggestions."""
+
+    def __init__(self, db_path: str | Path):
+        self.db_path = Path(db_path)
         self.database = self._load_or_create()
-    
-    def _load_or_create(self) -> Dict:
-        """Lade oder erstelle Datenbank"""
-        if os.path.exists(self.db_path):
+
+    @staticmethod
+    def _empty() -> Dict[str, List[Dict[str, Any]]]:
+        return {"tasks": [], "suggestions": [], "scripts": []}
+
+    def _load_or_create(self) -> Dict[str, List[Dict[str, Any]]]:
+        if self.db_path.exists():
             try:
-                with open(self.db_path, 'r') as f:
-                    return json.load(f)
-            except:
-                return defaultdict(lambda: {"tasks": [], "suggestions": [], "scripts": []})
-        return defaultdict(lambda: {"tasks": [], "suggestions": [], "scripts": []})
-    
-    def save(self):
-        """Speichere Datenbank"""
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-        with open(self.db_path, 'w') as f:
-            json.dump(self.database, f, indent=2, default=str)
+                with open(self.db_path, "r", encoding="utf-8") as handle:
+                    data = json.load(handle)
+                if isinstance(data, dict):
+                    return {**self._empty(), **data}
+            except (OSError, ValueError) as exc:
+                LOGGER.warning("Suggestions-DB konnte nicht gelesen werden: %s", exc)
+        return self._empty()
 
+    def save(self) -> None:
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.db_path, "w", encoding="utf-8") as handle:
+            json.dump(self.database, handle, indent=2, ensure_ascii=False)
 
-# FastAPI App Initialisierung
-app = FastAPI(
-    title="Jira Scanner API",
-    description="API für Task Scanner und Requirement Matching",
-    version="1.0.0"
-)
+    def list_suggestions(self) -> List[Dict[str, Any]]:
+        return list(self.database.get("suggestions", []))
 
-# CORS configuration
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Database Instance
-db = SuggestionDB(db_path="/home/user1/work/jirascanner/inventory/suggestions.json")
-
-# Utility Functions
-def extract_jira_references(text: str) -> List[str]:
-    """Extrahiere Jira-ID aus Text"""
-    pattern = r'\b([A-Z]+-\d{3,6})\b'
-    return re.findall(pattern, text)
-
-
-def extract_requirements(text: str) -> List[Dict]:
-    """Extrahiere Anforderungen aus Text"""
-    requirements = []
-    
-    # Suche nach "Acceptance:" Pattern
-    acceptance_section = re.search(r'Acceptance:[\s\S]*?', text)
-    if acceptance_section:
-        lines = acceptance_section.group().strip().split('\n')
-        for line in lines:
-            if line.strip():
-                requirements.append({
-                    'id': f'ACC-{len(requirements) + 1}',
-                    'type': 'acceptance',
-                    'description': line.strip(),
-                    'priority': 'high'
-                })
-    
-    # Suche nach "Technical:" Pattern
-    technical_section = re.search(r'Technical:[\s\S]*?', text)
-    if technical_section:
-        lines = technical_section.group().strip().split('\n')
-        for line in lines:
-            if line.strip():
-                requirements.append({
-                    'id': f'TEC-{len(requirements) + 1}',
-                    'type': 'technical',
-                    'description': line.strip(),
-                    'priority': 'medium'
-                })
-    
-    # Suche nach "Perfomance:" Pattern  
-    performance_section = re.search(r'Performance:[\s\S]*?', text)
-    if performance_section:
-        lines = performance_section.group().strip().split('\n')
-        for line in lines:
-            if line.strip():
-                requirements.append({
-                    'id': f'PERF-{len(requirements) + 1}',
-                    'type': 'non-functional',
-                    'description': line.strip(),
-                    'priority': 'medium'
-                })
-    
-    return requirements
-
-
-@app.get("/")
-async def root():
-    """API Willkommen"""
-    return {
-        "service": "Jira/Gira Scanner API",
-        "version": "1.0.0",
-        "status": "running",
-        "endpoints": [
-            "/tasks/",
-            "/scripts/",
-            "/suggestions/",
-            "/gaps/"
-        ]
-    }
-
-
-@app.get("/tasks")
-async def get_tasks(jql: str = ..., project: str = ...):
-    """Hole Jira-Tasks"""
-    try:
-        # Jira API Aufruf würde hier sein
-        tasks = []
-        
-        return tasks
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@app.post("/tasks")
-async def create_task(task: JiraTask):
-    """Erstelle neuen Task"""
-    # Task würde in Database gespeichert
-    return {"status": "success", "message": f"Task {task.key} erstellt"}
-
-
-@app.get("/scripts")
-async def get_scripts(path: str = "/home/user1/work/jirascanner/scripts"):
-    """Hole alle Scanner-Scripts"""
-    try:
-        from scripts.script_inventory import ScriptAnalyzer
-        analyzer = ScriptAnalyzer()
-        
-        # Scan directory
-        scripts = analyzer.scan_directory(path)
-        return {"scripts": scripts}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@app.post("/scripts/analyze")
-async def analyze_script(path: str, content: str = None):
-    """Analysiere einzelnes Script"""
-    try:
-        from scripts.script_inventory import ScriptAnalyzer
-        analyzer = ScriptAnalyzer()
-        
-        script_info = analyzer.analyze_file(Path(path))
-        
-        if content and script_info.get('path') == str(path):
-            # Update mit übergebenem Inhalt
-            script_info['content_length'] = len(content)
-        
-        return {"script": script_info}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@app.get("/suggestions")
-async def get_suggestions():
-    """Erzie alle Suggestions"""
-    if "tasks" not in db.database:
-        return {"suggestions": [], "count": 0}
-    
-    return {
-        "suggestions": db.database["tasks"].get("suggestions", []),
-        "count": len(db.database["tasks"].get("suggestions", []))
-    }
-
-
-@app.post("/suggestions")
-async def create_suggestion(suggestion: Suggestion):
-    """Erstelle Suggestion"""
-    # Validation
-    if not suggestion.title or not suggestion.description:
-        raise HTTPException(status_code=400, detail="Title und Description sind required")
-    
-    # Speichere Suggestion
-    db.database["tasks"]["suggestions"].append({
-        "data": {
-            "id": f"SUG-{datetime.now().timestamp():.0f}",
+    def add_suggestion(self, suggestion: Suggestion) -> Dict[str, Any]:
+        entry = {
+            "id": f"SUG-{uuid.uuid4().hex[:8]}",
             "title": suggestion.title,
             "description": suggestion.description,
             "task_id": suggestion.task_id,
             "severity": suggestion.severity,
             "category": suggestion.category,
             "file_path": suggestion.file_path,
-            "created": datetime.now().isoformat(),
-            "status": "pending"
+            "created": datetime.now().isoformat(timespec="seconds"),
+            "status": "pending",
         }
-    })
-    db.save()
-    
-    return {"status": "success", "id": f"SUG-{datetime.now().timestamp():.0f}"}
+        self.database.setdefault("suggestions", []).append(entry)
+        self.save()
+        return entry
+
+    def add_task(self, task: Dict[str, Any]) -> None:
+        self.database.setdefault("tasks", []).append(task)
+        self.save()
 
 
-@app.post("/suggestions/batch")
-async def batch_create_suggestions(suggestions: List[Suggestion]):
-    """Batch Create Suggestions"""
-    results = []
-    for suggestion in suggestions:
-        result = await create_suggestion(suggestion)
-        results.append(result)
-    return {"status": "success", "created": len(results)}
+def _default_db_path() -> Path:
+    env_path = os.environ.get("JIRA_SCANNER_DB")
+    if env_path:
+        return Path(env_path)
+    storage = CONFIG.get("storage", {})
+    inventory_dir = resolve_path(storage.get("inventory_path", ROOT / "inventory"))
+    return inventory_dir / str(storage.get("suggestions_file", "suggestions.json"))
 
 
-@app.get("/gaps")
-async def analyze_gaps(task_keys: List[str] = []):
-    """Analyse Gaps zwischen Requirements und Implementation"""
-    if not task_keys:
-        task_keys = [""]
-    
-    gaps = []
-    
-    for task_key in task_keys:
-        # Gap Analysis würde hier implementiert werden
-        # Prüfte Implementation vs Requirements
-        
-        gap = {}
-        if task_key:
-            # Gap-Analyse Logik
-            pass
-        
-        gaps.append(gap)
-    
-    return {"gaps": gaps}
+store = SuggestionStore(_default_db_path())
 
 
-@app.get("/match")
-async def match_requirements_and_implementation(task_key: str, script_path: str = None):
-    """Match Requirements mit Implementation"""
-    # Match-Logik würde hier sein
-    
-    matches = {
-        "task": task_key,
-        "script": script_path,
-        "match_score": 0.0,
-        "matching_requirements": [],
-        "missing_requirements": [],
-        "partially_implemeted": False
+# --------------------------------------------------------------------------- Helpers
+
+
+def extract_jira_references(text: str) -> List[str]:
+    """Extrahiert Jira-Keys (z. B. CPU-1234) aus Text."""
+    return re.findall(r"\b([A-Z][A-Z0-9]+-\d+)\b", text or "")
+
+
+def extract_requirements(text: str) -> List[Dict[str, Any]]:
+    """Extrahiert einfache Anforderungen aus Abschnitten wie ``Acceptance:``."""
+    requirements: List[Dict[str, Any]] = []
+    sections = {
+        "Acceptance": ("acceptance", "high"),
+        "Technical": ("technical", "medium"),
+        "Performance": ("non-functional", "medium"),
     }
-    
-    return matches
+    for heading, (kind, priority) in sections.items():
+        match = re.search(rf"{heading}:\s*([\s\S]*?)(?:\n[A-Z][a-z]+:|$)", text or "")
+        if not match:
+            continue
+        for line in match.group(1).splitlines():
+            line = line.strip(" -\t")
+            if line:
+                requirements.append(
+                    {
+                        "id": f"{kind[:3].upper()}-{len(requirements) + 1}",
+                        "type": kind,
+                        "description": line,
+                        "priority": priority,
+                    }
+                )
+    return requirements
 
 
-# Startup Events
-@app.on_event("startup")
-async def startup():
-    """Startup initialisierung"""
-    print("Jira/Gira Scanner API starting...")
+def _script_path() -> Path:
+    return resolve_path(
+        CONFIG.get("scripts", {}).get("base_path", ROOT / "scripts")
+    )
 
 
-# Health Check
-@app.get("/health")
-async def health_check():
-    """Health Check"""
-    return {"status": "healthy"}
+def _analyzer() -> ScriptAnalyzer:
+    scripts_cfg = CONFIG.get("scripts", {})
+    return ScriptAnalyzer(
+        extensions=scripts_cfg.get("extensions"),
+        exclude=scripts_cfg.get("exclude"),
+    )
 
 
-# Run Local
+def _cached_tasks() -> List[Dict[str, Any]]:
+    cache = resolve_path(
+        CONFIG.get("storage", {}).get("jira_cache", ROOT / "jira_data" / "tasks.json")
+    )
+    if not cache.exists():
+        return []
+    try:
+        with open(cache, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            return list(data.get("tasks", []))
+    except (OSError, ValueError) as exc:
+        LOGGER.warning("Task-Cache konnte nicht gelesen werden: %s", exc)
+    return []
+
+
+# --------------------------------------------------------------------------- App
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    LOGGER.info("Jira/Gira Scanner API gestartet")
+    yield
+    LOGGER.info("Jira/Gira Scanner API beendet")
+
+
+app = FastAPI(
+    title="Jira Scanner API",
+    description="API für Task-Scanner, Script-Inventar und Requirements-Matching",
+    version="1.1.0",
+    lifespan=lifespan,
+)
+
+origins = list(CONFIG.get("api", {}).get("cors_origins") or [])
+if not origins:
+    origins = ["http://localhost:8000", "http://127.0.0.1:8000"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials="*" not in origins,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+router = APIRouter(prefix="/api")
+
+
+@router.get("/tasks")
+def get_tasks(
+    project: Optional[str] = None,
+    jql: Optional[str] = None,
+    refresh: bool = False,
+) -> Dict[str, Any]:
+    """Liefert gecachte Tasks oder lädt sie bei ``refresh=true`` aus Jira."""
+    if refresh:
+        from main import JiraClient
+
+        config = dict(CONFIG)
+        if project:
+            config["project"] = {**config.get("project", {}), "key": project}
+        if jql:
+            config["project"] = {**config.get("project", {}), "jql": jql}
+        tasks = JiraClient(config).search_tasks()
+        return {
+            "tasks": [task.__dict__ for task in tasks],
+            "count": len(tasks),
+            "source": "jira",
+        }
+    tasks = _cached_tasks()
+    return {"tasks": tasks, "count": len(tasks), "source": "cache"}
+
+
+@router.post("/tasks")
+def create_task(task: JiraTask) -> Dict[str, Any]:
+    store.add_task(task.model_dump())
+    return {"status": "success", "message": f"Task {task.key} gespeichert"}
+
+
+@router.get("/scripts")
+def get_scripts(path: Optional[str] = None) -> Dict[str, Any]:
+    """Scannt das Script-Verzeichnis."""
+    target = resolve_path(path) if path else _script_path()
+    scripts = _analyzer().scan_directory(target)
+    return {"scripts": scripts, "count": len(scripts), "path": str(target)}
+
+
+@router.post("/scripts/analyze")
+def analyze_script(path: str) -> Dict[str, Any]:
+    """Analysiert eine einzelne Script-Datei."""
+    target = resolve_path(path)
+    if not target.exists():
+        raise HTTPException(status_code=404, detail=f"Datei nicht gefunden: {target}")
+    return {"script": _analyzer().analyze_file(target)}
+
+
+@router.get("/suggestions")
+def get_suggestions() -> Dict[str, Any]:
+    suggestions = store.list_suggestions()
+    return {"suggestions": suggestions, "count": len(suggestions)}
+
+
+@router.post("/suggestions")
+def create_suggestion(suggestion: Suggestion) -> Dict[str, Any]:
+    entry = store.add_suggestion(suggestion)
+    return {"status": "success", "suggestion": entry}
+
+
+@router.post("/suggestions/batch")
+def batch_create_suggestions(suggestions: List[Suggestion]) -> Dict[str, Any]:
+    created = [store.add_suggestion(suggestion) for suggestion in suggestions]
+    return {"status": "success", "created": len(created), "suggestions": created}
+
+
+@router.get("/gaps")
+def analyze_gaps(
+    task_keys: Optional[List[str]] = Query(default=None),
+) -> Dict[str, Any]:
+    """Vergleicht Tasks mit vorhandenen Script-Implementierungen."""
+    scripts = _analyzer().scan_directory(_script_path())
+    index: Dict[str, List[Dict[str, Any]]] = {}
+    for script in scripts:
+        for reference in script.get("jira_refs", []):
+            index.setdefault(reference.upper(), []).append(script)
+
+    keys = [key.upper() for key in (task_keys or [])] or sorted(index)
+    gaps: List[Dict[str, Any]] = []
+    for key in keys:
+        implementations = index.get(key, [])
+        gaps.append(
+            GapAnalysis(
+                task_key=key,
+                summary="",
+                has_implementation=bool(implementations),
+                implementation_path=(
+                    implementations[0]["path"] if implementations else None
+                ),
+                missing_requirements=(
+                    [] if implementations else ["Keine Implementierung gefunden"]
+                ),
+                completion_percentage=100.0 if implementations else 0.0,
+            ).model_dump()
+        )
+    return {"gaps": gaps, "count": len(gaps)}
+
+
+@router.get("/match")
+def match_requirements_and_implementation(
+    task_key: str, script_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """Prüft, ob ein Script den Task referenziert."""
+    scripts = _analyzer().scan_directory(_script_path())
+    candidates = [
+        script for script in scripts if task_key.upper() in script.get("jira_refs", [])
+    ]
+    if script_path:
+        candidates = [
+            script
+            for script in candidates
+            if Path(script["path"]).resolve() == resolve_path(script_path)
+        ]
+    return {
+        "task": task_key,
+        "script": candidates[0]["path"] if candidates else script_path,
+        "match_score": 1.0 if candidates else 0.0,
+        "matching_requirements": [],
+        "missing_requirements": [] if candidates else ["Keine Implementierung gefunden"],
+        "partially_implemented": False,
+    }
+
+
+@router.get("/health")
+def health_check() -> Dict[str, Any]:
+    return {
+        "status": "healthy",
+        "version": app.version,
+        "suggestions": len(store.list_suggestions()),
+    }
+
+
+app.include_router(router)
+
+
+@app.get("/", include_in_schema=False)
+def dashboard() -> Any:
+    """Liefert das Dashboard aus, wenn vorhanden."""
+    path = ROOT / "dashboard" / "dashboard.html"
+    if path.exists():
+        return FileResponse(path)
+    return {
+        "service": "Jira/Gira Scanner API",
+        "version": app.version,
+        "docs": "/docs",
+        "endpoints": ["/api/tasks", "/api/scripts", "/api/suggestions", "/api/gaps"],
+    }
+
+
+def main() -> int:
+    """Startet den API-Server (auch als Console-Script nutzbar)."""
+    uvicorn.run(
+        app,
+        host=os.environ.get("API_HOST", "127.0.0.1"),
+        port=int(os.environ.get("API_PORT", "8000")),
+    )
+    return 0
+
+
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    raise SystemExit(main())
