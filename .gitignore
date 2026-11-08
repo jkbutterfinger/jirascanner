@@ -1,0 +1,53 @@
+# 虚拟环境
+venv/
+env/
+.venv/
+ENV/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+.Python
+*.so
+.PKG-DEB
+*.egg-info/
+dist/
+build/
+
+# Jira/Gira 数据存储
+inventory/inventory.json
+inventory/suggestions.json
+inventory/*.json
+jira_data/
+confluence_data/
+
+# 环境配置文件
+.env
+.env.local
+.env.*.local
+*.token
+*.credentials
+
+# IDE 配置
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 临时文件
+*.tmp
+*.temp
+*~
+*.log
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
