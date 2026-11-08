@@ -51,3 +51,11 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Ausgabe-Verzeichnisse
+output/*.xlsx
+output/*.csv
+
+# Logs
+logs/*.log
+*.log
