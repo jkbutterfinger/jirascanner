@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jira-scanner"
+version = "1.0.0"
+description = "Jira/Gira Task Scanner with Excel Export for CPU- prefix tasks"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Jira Scanner Team", email = "team@example.com"}
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "pyyaml>=6.0",
+    "requests>=2.28.0",
+    "openpyxl>=3.1.0",
+    "lxml>=4.7.0",
+    "pandas>=1.5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+]
+
+[project.urls]
+Repository = "https://github.com/user/jira-scanner"
+Documentation = "https://github.com/user/jira-scanner#readme"
+
+[project.scripts]
+jira-scan = "main:main"
+jira-report = "main:main"

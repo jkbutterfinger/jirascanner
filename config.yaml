@@ -1,0 +1,96 @@
+# Jira/Gira Scanner Configuration
+# --------------------------------
+
+# Server Configuration
+server:
+  url: "https://your-jira-server.com"
+  protocol: "https"
+  port: 443
+
+# API Authentication
+api:
+  token: ""
+  username: ""
+  password: ""
+  auth_type: "token"  # token, username/password
+
+# Jira Project Configuration
+project:
+  key: "CPU"         # Projektschlüssel
+  name: "Capacity Planning"
+  space_key: "Y"      # Confluence Space Key
+  jql: ""
+
+# Data Storage
+storage:
+  inventory_path: "/home/user1/work/jirascanner/inventory/"
+  inventory_file: "inventory.json"
+  suggestions_file: "suggestions.json"
+  jira_cache: "jira_data/tasks.json"
+
+# Scripts Inventory
+scripts:
+  base_path: "/home/user1/work/jirascanner/scripts/"
+  extensions: [".py", ".sh", ".sql", ".js", ".ts"]
+  include_subdirectories: true
+
+# Jira Task Filters
+filters:
+  prefix: "CPU-"      # Nur CPU- Tasks
+  min_priority: "medium"  # Blocker, Critical, High, Medium, Low
+  statuses:
+    - "open"
+    - "in progress"
+    - "done"
+  exclude_keywords: ["bug", "technical debt", "cleanup"]
+
+# Matching Rules
+matching:
+  enable_auto_match: true
+  min_similar_score: 0.7
+  match_fields:
+    - "description"
+    - "title"
+    - "summary"
+    - "acceptance criteria"
+
+# Performance
+performance:
+  max_results: 1000
+  parallel_requests: 10
+  timeout: 30
+  retry_attempts: 3
+
+# Excel Report Configuration
+excel:
+  output_path: "/home/user1/work/jirascanner/output/"
+  output_filename: "jira_report_{YYYY}-{MM}-{DD}.xlsx"
+  include_headers: true
+  datetime_format: "%Y-%m-%d %H:%M:%S"
+  sheet_names:
+    - "Requirements"
+    - "Implementations"
+    - "Gaps"
+
+# Confluence Integration
+confluence:
+  enabled: false
+  base_url: "https://your-confluence-server.com"
+  api_token: ""
+  attachments_path: "jira_data/attachments/"
+
+# Logging
+logging:
+  level: "INFO"
+  output_file: "logs/jira_scanner.log"
+  max_size_mb: 100
+  backup_count: 5
+
+# Authentication
+auth:
+  domain: "your-domain.com"
+  proxy_enabled: false
+  proxy_host: ""
+  proxy_port: ""
+  proxy_username: ""
+  proxy_password: ""
