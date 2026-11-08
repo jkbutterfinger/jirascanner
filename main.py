@@ -105,7 +105,12 @@ def adf_to_text(node: Any) -> str:
 
 
 def format_datetime(value: Any, fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
-    """Formatiert ISO-8601-Strings aus Jira; lässt Unbekanntes unverändert."""
+    """Formatiert ISO-8601-Strings aus Jira; lässt Unbekanntes unverändert.
+
+    Jira liefert Offsets teils als ``+0000`` (ohne Doppelpunkt). Python 3.10
+    akzeptiert das in ``datetime.fromisoformat`` noch nicht, daher wird das
+    Offset vor dem Parsen normalisiert.
+    """
     if value in (None, ""):
         return ""
     if isinstance(value, datetime):
@@ -113,8 +118,10 @@ def format_datetime(value: Any, fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
     text = str(value).strip()
     if not text:
         return ""
+    normalized = text.replace("Z", "+00:00")
+    normalized = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", normalized)
     try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(normalized)
         return parsed.strftime(fmt)
     except ValueError:
         return text

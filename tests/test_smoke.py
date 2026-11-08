@@ -51,6 +51,8 @@ def test_adf_to_text_and_datetime() -> None:
     }
     assert adf_to_text(adf).strip() == "Hallo Welt"
     assert format_datetime("2024-01-15T09:30:00.000+0000") == "2024-01-15 09:30:00"
+    assert format_datetime("2024-01-15T09:30:00Z") == "2024-01-15 09:30:00"
+    assert format_datetime("2024-01-15T09:30:00+02:00") == "2024-01-15 09:30:00"
     assert format_datetime("") == ""
 
 
