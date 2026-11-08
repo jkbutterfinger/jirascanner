@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-"""Jira/Gira Scanner with Excel Export.
+"""Jira/Gira Scanner with per-task Excel export.
 
-Scannt Jira-Tasks mit einem konfigurierbaren Prefix (Standard: ``CPU-``),
-verknüpft sie mit lokalen Skripten und erzeugt einen Excel-Bericht
-(optional zusätzlich als CSV).
+Der Scanner sucht ausschließlich SQL-Dateien unterhalb von
+``scripts.base_path``. Die Jira-Referenz wird nicht aus dem Dateiinhalt,
+sondern aus der Verzeichnisstruktur abgeleitet::
+
+    <base_path>/<Jahr>/<Abteilung>/<Auftraggeber>/<Jira-Task>/<name>.sql
+
+Für jeden Jira-Task wird ein Excel-Bericht direkt im Task-Verzeichnis
+abgelegt::
+
+    <base_path>/<Jahr>/<Abteilung>/<Auftraggeber>/<Jira-Task>/<Jira-Task>.xlsx
 
 Die kanonische Implementierung liegt in dieser Datei. Der historische
 Einstiegspunkt ``scanner/main_scanner.py`` delegiert nur noch hierher.
@@ -78,6 +85,9 @@ JIRA_FIELDS = [
     "labels",
 ]
 
+# Jira-Key-Muster, z. B. JRA-1001. Wird auf den Verzeichnisnamen angewendet.
+TASK_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
+
 
 class JiraError(RuntimeError):
     """Fehler bei der Kommunikation mit der Jira-API."""
@@ -129,8 +139,31 @@ def format_datetime(value: Any, fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
 
 def format_date(value: Any) -> str:
     """Formatiert einen Zeitstempel als reines Datum (YYYY-MM-DD)."""
-    formatted = format_datetime(value, "%Y-%m-%d")
-    return formatted
+    return format_datetime(value, "%Y-%m-%d")
+
+
+def task_key_from_directory(directory: Path) -> str:
+    """Leitet den Jira-Key aus dem Verzeichnisnamen ab.
+
+    Beispiel: ``.../JRA-1001/script.sql`` -> ``JRA-1001``.
+    Gibt einen leeren String zurück, wenn der Name kein Jira-Key ist.
+    """
+    candidate = directory.name.strip().upper()
+    return candidate if TASK_KEY_PATTERN.match(candidate) else ""
+
+
+def derive_path_context(task_directory: Path) -> Dict[str, str]:
+    """Liefert Jahr/Abteilung/Auftraggeber aus der Verzeichnisstruktur.
+
+    Erwartet ``<Jahr>/<Abteilung>/<Auftraggeber>/<Jira-Task>``. Fehlende
+    Ebenen werden als leerer String zurückgegeben.
+    """
+    parents = list(task_directory.parents)
+    return {
+        "CUSTOMER": task_directory.parent.name if len(parents) >= 1 else "",
+        "DEPARTMENT": parents[1].name if len(parents) >= 2 else "",
+        "YEAR": parents[2].name if len(parents) >= 3 else "",
+    }
 
 
 @dataclass
@@ -162,7 +195,7 @@ class JiraClient:
 
         self.url = str(server.get("url", "")).rstrip("/")
         self.token = str(api.get("token", "") or "")
-        self.project_key = str(project.get("key", "CPU") or "CPU")
+        self.project_key = str(project.get("key", "JRA") or "JRA")
         self.custom_jql = str(project.get("jql", "") or "")
         self.timeout = max(1, int(performance.get("timeout", 30)))
         self.retry_attempts = max(1, int(performance.get("retry_attempts", 3)))
@@ -266,7 +299,7 @@ class JiraClient:
 
     def search_tasks(self, prefix: Optional[str] = None) -> List[JiraIssue]:
         """Sucht Tasks im Projekt und filtert optional nach Key-Prefix."""
-        prefix = prefix or str(self.config.get("filters", {}).get("prefix", "CPU-"))
+        prefix = prefix or str(self.config.get("filters", {}).get("prefix", "JRA-"))
         if not self.is_configured():
             LOGGER.warning(
                 "Jira ist nicht konfiguriert (server.url/api.token). "
@@ -316,26 +349,23 @@ class JiraClient:
 
 
 class ScriptScanner:
-    """Scannt Skripte und extrahiert Implementierungsdetails.
+    """Scannt SQL-Dateien und ordnet sie über die Verzeichnisstruktur zu.
 
-    Die Dateien werden genau einmal gelesen und über die gefundenen
-    Jira-Referenzen indexiert. Dadurch entfällt das frühere
-    O(Tasks × Scripts)-Verhalten.
+    Die Jira-Referenz ergibt sich aus dem Elternverzeichnis der SQL-Datei::
+
+        .../<Jahr>/<Abteilung>/<Auftraggeber>/<Jira-Task>/<name>.sql
+
+    Dadurch ist keine Referenz im Dateiinhalt nötig. Jede Datei wird genau
+    einmal gelesen und über den Task-Key indexiert.
     """
 
-    IMPORT_PATTERNS = [
-        re.compile(r"^\s*import\s+([A-Za-z_][\w.]*)", re.MULTILINE),
-        re.compile(r"^\s*from\s+([A-Za-z_][\w.]*)\s+import\b", re.MULTILINE),
-        re.compile(r"""require\(\s*["']([^"']+)["']\s*\)"""),
-    ]
-    JIRA_REF_PATTERN = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
     KPI_PATTERN = re.compile(r"\b(kpi|dashboard|report|metric)\w*\b", re.IGNORECASE)
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config or load_config()
         scripts_cfg = self.config.get("scripts", {})
         self.base_path = resolve_path(scripts_cfg.get("base_path", ROOT / "scripts"))
-        self.extensions = list(scripts_cfg.get("extensions", [".py", ".sh", ".sql"]))
+        self.extensions = list(scripts_cfg.get("extensions", [".sql"]))
         self.include_subdirectories = bool(
             scripts_cfg.get("include_subdirectories", True)
         )
@@ -345,9 +375,9 @@ class ScriptScanner:
 
     # ---------------------------------------------------------------- Dateien
     def find_scripts(self) -> List[Path]:
-        """Findet alle relevanten Skriptdateien (ohne Duplikate)."""
+        """Findet alle relevanten SQL-Dateien (ohne Duplikate)."""
         if not self.base_path.exists():
-            LOGGER.warning("Scripts-Pfad nicht gefunden: %s", self.base_path)
+            LOGGER.warning("SQL-Pfad nicht gefunden: %s", self.base_path)
             return []
 
         found: List[Path] = []
@@ -369,18 +399,30 @@ class ScriptScanner:
         return self._scripts
 
     def extract_script_info(self, script_path: Path) -> Dict[str, Any]:
-        """Extrahiert Metadaten, Jira-Referenzen und Technologien."""
+        """Extrahiert Metadaten und den Task-Key aus dem Elternverzeichnis."""
         info: Dict[str, Any] = {
             "path": str(script_path),
             "name": script_path.name,
             "size_bytes": 0,
             "lines": 0,
             "modified_date": "",
+            "task_key": "",
+            "task_dir": str(script_path.parent),
             "jira_refs": [],
             "technologies": [],
             "kpi_reports": [],
             "error": "",
         }
+
+        task_key = task_key_from_directory(script_path.parent)
+        if task_key:
+            info["task_key"] = task_key
+            info["jira_refs"] = [task_key]
+        else:
+            LOGGER.warning(
+                "SQL-Datei ohne Jira-Task-Verzeichnis wird ignoriert: %s",
+                script_path,
+            )
 
         try:
             stat = script_path.stat()
@@ -394,16 +436,35 @@ class ScriptScanner:
             return info
 
         info["lines"] = len(content.splitlines())
-        info["jira_refs"] = sorted(set(self.JIRA_REF_PATTERN.findall(content)))
-        info["technologies"] = self._detect_technologies(content)
+        info["technologies"] = self._detect_technologies(content, script_path.suffix)
         info["kpi_reports"] = sorted(
             {match.lower() for match in self.KPI_PATTERN.findall(content)}
         )
         return info
 
-    def _detect_technologies(self, content: str) -> List[str]:
+    @staticmethod
+    def _detect_technologies(content: str, suffix: str = ".sql") -> List[str]:
+        """Erkennt Technologien. Für SQL-Dateien inkl. grober Dialekt-Hinweise."""
+        if suffix.lower() == ".sql":
+            technologies = {"SQL"}
+            upper = content.upper()
+            if "PL/PGSQL" in upper or "LANGUAGE PLPGSQL" in upper:
+                technologies.add("PL/pgSQL")
+            if "NVARCHAR" in upper or "\nGO\n" in upper:
+                technologies.add("T-SQL")
+            if "AUTO_INCREMENT" in upper or "ENGINE=" in upper:
+                technologies.add("MySQL")
+            if "VARCHAR2" in upper or "ROWNUM" in upper:
+                technologies.add("Oracle")
+            return sorted(technologies)
+
         names: set[str] = set()
-        for pattern in self.IMPORT_PATTERNS:
+        import_patterns = [
+            re.compile(r"^\s*import\s+([A-Za-z_][\w.]*)", re.MULTILINE),
+            re.compile(r"^\s*from\s+([A-Za-z_][\w.]*)\s+import\b", re.MULTILINE),
+            re.compile(r"""require\(\s*["']([^"']+)["']\s*\)"""),
+        ]
+        for pattern in import_patterns:
             for match in pattern.findall(content):
                 root = match.split(".")[0].strip()
                 if root and not root.startswith((".", "/")):
@@ -415,53 +476,108 @@ class ScriptScanner:
 
     # ---------------------------------------------------------------- Matching
     def build_index(self) -> Dict[str, List[Dict[str, Any]]]:
-        """Liest alle Skripte einmal und indexiert sie nach Jira-Referenz."""
+        """Liest alle SQL-Dateien einmal und indexiert sie nach Task-Key."""
         index: Dict[str, List[Dict[str, Any]]] = {}
         for script in self.find_scripts():
             info = self.extract_script_info(script)
             if info.get("error"):
-                LOGGER.warning("Skript konnte nicht gelesen werden: %s", info["error"])
+                LOGGER.warning("SQL-Datei konnte nicht gelesen werden: %s", info["error"])
             for reference in info.get("jira_refs", []):
                 index.setdefault(reference.upper(), []).append(info)
         self._index = index
-        LOGGER.info("%s Skript(e) indexiert", len(self._scripts))
+        LOGGER.info(
+            "%s SQL-Datei(en) indexiert (%s Task-Verzeichnis(se))",
+            len(self._scripts),
+            len(index),
+        )
         return index
 
     def get_task_info(self, task: JiraIssue) -> List[Dict[str, Any]]:
-        """Liefert alle zum Task passenden Skript-Informationen."""
+        """Liefert alle SQL-Dateien, die im Verzeichnis des Tasks liegen."""
         if self._index is None:
             self.build_index()
         assert self._index is not None
         return self._index.get(task.key.upper(), [])
 
+    def get_task_directory(self, task: JiraIssue) -> Optional[Path]:
+        """Liefert das Verzeichnis des Tasks, falls SQL-Dateien existieren."""
+        matches = self.get_task_info(task)
+        if not matches:
+            return None
+        return Path(matches[0]["path"]).parent
+
 
 class ExcelExporter:
-    """Erzeugt den Excel-Bericht (alle 10 Spalten nebeneinander)."""
+    """Erzeugt pro Jira-Task einen Excel-Bericht im Task-Verzeichnis."""
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config or load_config()
         excel_cfg = self.config.get("excel", {})
         self.output_dir = resolve_path(excel_cfg.get("output_path", ROOT / "output"))
-        self.filename_pattern = str(
-            excel_cfg.get("output_filename", "jira_report_{YYYY}_{MM}_{DD}.xlsx")
+        self.filename_pattern = str(excel_cfg.get("output_filename", "{JIRA}.xlsx"))
+        self.fallback_pattern = str(
+            excel_cfg.get("fallback_filename", "jira_report_{YYYY}_{MM}_{DD}.xlsx")
         )
         self.datetime_format = str(
             excel_cfg.get("datetime_format", "%Y-%m-%d %H:%M:%S")
         )
-        self.include_csv = bool(excel_cfg.get("include_csv", True))
+        self.include_csv = bool(excel_cfg.get("include_csv", False))
         self.sheet_name = str(excel_cfg.get("sheet_name", "Jira-Task-Report"))
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def _filename(self) -> str:
+    @staticmethod
+    def _render_pattern(pattern: str, values: Dict[str, Any]) -> str:
+        """Ersetzt Platzhalter und entfernt unbekannte Platzhalter."""
         now = datetime.now()
-        return (
-            self.filename_pattern.replace("{YYYY}", now.strftime("%Y"))
-            .replace("{MM}", now.strftime("%m"))
-            .replace("{DD}", now.strftime("%d"))
+        merged: Dict[str, str] = {
+            "YYYY": now.strftime("%Y"),
+            "MM": now.strftime("%m"),
+            "DD": now.strftime("%d"),
+        }
+        merged.update(
+            {key: str(value) for key, value in values.items() if value is not None}
         )
 
+        rendered = pattern
+        for key, value in merged.items():
+            rendered = rendered.replace("{" + key + "}", value)
+        rendered = re.sub(r"\{[A-Z_]+\}", "", rendered)
+        rendered = rendered.replace("/", "_").replace("\\", "_").strip()
+        if not rendered:
+            rendered = "report.xlsx"
+        if not rendered.lower().endswith(".xlsx"):
+            rendered += ".xlsx"
+        return rendered
+
+    def export_task(
+        self,
+        task_key: str,
+        rows: List[Dict[str, Any]],
+        directory: Path,
+        sql_stem: Optional[str] = None,
+        path_context: Optional[Dict[str, str]] = None,
+    ) -> str:
+        """Schreibt einen Bericht direkt in das Verzeichnis des Tasks."""
+        values: Dict[str, Any] = {"JIRA": task_key, "SQL": sql_stem or task_key}
+        if path_context:
+            values.update(path_context)
+
+        filename = self._render_pattern(self.filename_pattern, values)
+        output_path = Path(directory) / filename
+        self._write_workbook(rows, output_path)
+        LOGGER.info("Excel-Bericht gespeichert: %s", output_path)
+        return str(output_path)
+
     def export(self, data: List[Dict[str, Any]]) -> str:
-        """Schreibt die Daten als XLSX und optional als CSV."""
+        """Fallback-Export in ``excel.output_path`` (z. B. leerer Bericht)."""
+        filename = self._render_pattern(self.fallback_pattern, {})
+        output_path = self.output_dir / filename
+        self._write_workbook(data, output_path)
+        LOGGER.info("Excel-Bericht gespeichert: %s", output_path)
+        return str(output_path)
+
+    def _write_workbook(self, data: List[Dict[str, Any]], output_path: Path) -> None:
+        """Erzeugt die Arbeitsmappe inklusive Formatierung und optional CSV."""
         workbook = Workbook()
         worksheet = workbook.active
         worksheet.title = self.sheet_name[:31]
@@ -504,9 +620,11 @@ class ExcelExporter:
                             end_color=fill_color,
                             fill_type="solid",
                         )
-            worksheet.row_dimensions[row_index].height = 30 if any(
-                row.get(title) for title, _w, wrap in COLUMNS if wrap
-            ) else 18
+            worksheet.row_dimensions[row_index].height = (
+                30
+                if any(row.get(title) for title, _w, wrap in COLUMNS if wrap)
+                else 18
+            )
 
         total_row = len(data) + 2
         worksheet.cell(row=total_row, column=1, value="GESAMT").font = Font(bold=True)
@@ -520,16 +638,13 @@ class ExcelExporter:
                 f"A1:{get_column_letter(len(COLUMNS))}{len(data) + 1}"
             )
 
-        output_path = self.output_dir / self._filename()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         workbook.save(output_path)
-        LOGGER.info("Excel-Bericht gespeichert: %s", output_path)
 
         if self.include_csv:
             csv_path = output_path.with_suffix(".csv")
             self.export_csv(data, csv_path)
             LOGGER.info("CSV-Bericht gespeichert: %s", csv_path)
-
-        return str(output_path)
 
     def export_csv(self, data: List[Dict[str, Any]], path: Path) -> str:
         """Schreibt denselben Inhalt als UTF-8-CSV (Semikolon-getrennt)."""
@@ -543,10 +658,7 @@ class ExcelExporter:
             writer.writeheader()
             for row in data:
                 writer.writerow(
-                    {
-                        title: row.get(title, "")
-                        for title, _width, _wrap in COLUMNS
-                    }
+                    {title: row.get(title, "") for title, _width, _wrap in COLUMNS}
                 )
         return str(path)
 
@@ -563,47 +675,60 @@ class ExcelExporter:
         return ""
 
 
-def build_report(tasks: List[JiraIssue], scanner: ScriptScanner) -> List[Dict[str, Any]]:
-    """Baut die Excel-Zeilen aus Jira-Tasks und gefundenen Skripten."""
-    rows: List[Dict[str, Any]] = []
+def build_rows_for_task(
+    task: JiraIssue, matches: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Baut die Excel-Zeilen eines Tasks (eine Zeile pro SQL-Datei)."""
+    resolved = format_datetime(task.resolved) or "Pending"
 
-    for task in tasks:
-        matches = scanner.get_task_info(task)
-        paths = [match.get("path", "") for match in matches if match.get("path")]
-        technologies: List[str] = []
-        for match in matches:
-            for technology in match.get("technologies", []):
-                if technology not in technologies:
-                    technologies.append(technology)
-
-        file_dates = [
-            format_date(match.get("modified_date"))
-            for match in matches
-            if match.get("modified_date")
+    if not matches:
+        return [
+            {
+                "Jira-Nummer": task.key,
+                "Jira-Auftraggeber": task.reporter,
+                "Entwickler": task.assignee,
+                "Jahr/Monat/Tag-Abgeschlossen": resolved,
+                "Zusammenfassung-Anforderung": task.summary,
+                "File-Datum": "",
+                "File-Location": "Not found",
+                "Verwendete-Technologien": "",
+                "Status": task.status or "Missing",
+                "Priorität": task.priority,
+            }
         ]
 
+    rows: List[Dict[str, Any]] = []
+    for match in matches:
         rows.append(
             {
                 "Jira-Nummer": task.key,
                 "Jira-Auftraggeber": task.reporter,
                 "Entwickler": task.assignee,
-                "Jahr/Monat/Tag-Abgeschlossen": format_datetime(
-                    task.resolved
-                )
-                or "Pending",
+                "Jahr/Monat/Tag-Abgeschlossen": resolved,
                 "Zusammenfassung-Anforderung": task.summary,
-                "File-Datum": file_dates[0] if file_dates else "",
-                "File-Location": "\n".join(paths) if paths else "Not found",
-                "Verwendete-Technologien": ", ".join(technologies[:8]),
-                "Status": task.status or ("Missing" if not matches else "Open"),
+                "File-Datum": format_date(match.get("modified_date")),
+                "File-Location": match.get("path", ""),
+                "Verwendete-Technologien": ", ".join(
+                    match.get("technologies", [])[:8]
+                ),
+                "Status": task.status or "Open",
                 "Priorität": task.priority,
             }
         )
-
     return rows
 
 
-def empty_report_row(prefix: str = "CPU-") -> Dict[str, Any]:
+def build_report(
+    tasks: List[JiraIssue], scanner: ScriptScanner
+) -> List[Dict[str, Any]]:
+    """Baut alle Excel-Zeilen aus Jira-Tasks und gefundenen SQL-Dateien."""
+    rows: List[Dict[str, Any]] = []
+    for task in tasks:
+        rows.extend(build_rows_for_task(task, scanner.get_task_info(task)))
+    return rows
+
+
+def empty_report_row(prefix: str = "JRA-") -> Dict[str, Any]:
     """Platzhalterzeile, wenn keine Tasks gefunden wurden."""
     return {
         "Jira-Nummer": prefix,
@@ -622,12 +747,15 @@ def empty_report_row(prefix: str = "CPU-") -> Dict[str, Any]:
 def main(argv: Optional[List[str]] = None) -> int:
     """CLI-Einstiegspunkt."""
     parser = argparse.ArgumentParser(
-        description="Jira/Gira Scanner – erzeugt einen Excel-Bericht für Tasks mit Prefix."
+        description=(
+            "Jira/Gira Scanner – sucht SQL-Dateien, leitet den Jira-Task aus "
+            "der Verzeichnisstruktur ab und schreibt ein Excel pro Auftrag."
+        )
     )
     parser.add_argument("--config", help="Pfad zur config.yaml")
     parser.add_argument(
         "--prefix",
-        help="Key-Prefix (überschreibt filters.prefix, Standard: CPU-)",
+        help="Key-Prefix (überschreibt filters.prefix, Standard: JRA-)",
     )
     parser.add_argument(
         "--dry-run",
@@ -639,7 +767,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     config = load_config(args.config)
     setup_logging(config, verbose=args.verbose)
-    prefix = args.prefix or str(config.get("filters", {}).get("prefix", "CPU-"))
+    prefix = args.prefix or str(config.get("filters", {}).get("prefix", "JRA-"))
 
     LOGGER.info("=" * 70)
     LOGGER.info("Jira/Gira Scanner gestartet (Prefix: %s)", prefix)
@@ -650,23 +778,79 @@ def main(argv: Optional[List[str]] = None) -> int:
     exporter = ExcelExporter(config)
 
     tasks = client.search_tasks(prefix=prefix)
-    if tasks:
-        rows = build_report(tasks, scanner)
-    else:
-        LOGGER.warning("Keine Tasks gefunden – es wird ein leerer Bericht erzeugt.")
+    if not tasks:
+        LOGGER.warning("Keine Tasks gefunden – es wird ein leerer Fallback-Bericht erzeugt.")
         rows = [empty_report_row(prefix)]
-
-    if args.dry_run:
-        exporter.export_simple(rows)
+        if args.dry_run:
+            exporter.export_simple(rows)
+            return 0
+        try:
+            output_path = exporter.export(rows)
+        except OSError as exc:
+            LOGGER.error("Bericht konnte nicht geschrieben werden: %s", exc)
+            return 1
+        LOGGER.info("Fertig: %s", output_path)
         return 0
 
-    try:
-        output_path = exporter.export(rows)
-    except OSError as exc:
-        LOGGER.error("Bericht konnte nicht geschrieben werden: %s", exc)
-        return 1
+    written: List[str] = []
+    unmatched: List[str] = []
+    all_rows: List[Dict[str, Any]] = []
 
-    LOGGER.info("Fertig: %s (%s Zeile(n))", output_path, len(rows))
+    for task in tasks:
+        matches = scanner.get_task_info(task)
+        rows = build_rows_for_task(task, matches)
+        all_rows.extend(rows)
+
+        if not matches:
+            unmatched.append(task.key)
+            continue
+        if args.dry_run:
+            continue
+
+        directory = Path(matches[0]["path"]).parent
+        sql_stem = Path(matches[0]["path"]).stem
+        path_context = derive_path_context(directory)
+        try:
+            written.append(
+                exporter.export_task(
+                    task.key,
+                    rows,
+                    directory,
+                    sql_stem=sql_stem,
+                    path_context=path_context,
+                )
+            )
+        except OSError as exc:
+            LOGGER.error("Bericht für %s konnte nicht geschrieben werden: %s", task.key, exc)
+            return 1
+
+    if args.dry_run:
+        exporter.export_simple(all_rows)
+        return 0
+
+    if unmatched:
+        LOGGER.warning(
+            "Für %s Task(s) wurde keine SQL-Datei gefunden: %s",
+            len(unmatched),
+            ", ".join(unmatched),
+        )
+
+    if not written:
+        LOGGER.warning(
+            "Keine SQL-Dateien in Task-Verzeichnissen gefunden – "
+            "es wird ein leerer Fallback-Bericht erzeugt."
+        )
+        try:
+            output_path = exporter.export([empty_report_row(prefix)])
+        except OSError as exc:
+            LOGGER.error("Bericht konnte nicht geschrieben werden: %s", exc)
+            return 1
+        LOGGER.info("Fertig: %s", output_path)
+        return 0
+
+    LOGGER.info("Fertig: %s Excel-Bericht(e) geschrieben", len(written))
+    for path in written:
+        LOGGER.info("  %s", path)
     return 0
 
 

@@ -25,8 +25,8 @@ api:
 
 # Jira-Projekt
 project:
-  key: "CPU"               # Projektschlüssel; Task-Keys beginnen mit "CPU-"
-  name: "Capacity Planning"
+  key: "JRA"               # Projektschlüssel; Task-Keys beginnen mit "JRA-"
+  name: "Jira Reporting"
   jql: ""                  # optional: eigene JQL (überschreibt project.key)
 
 # Datenablage
@@ -36,18 +36,19 @@ storage:
   suggestions_file: "suggestions.json"
   jira_cache: "jira_data/tasks.json"
 
-# Zu scannende Skripte
+# Zu scannende Dateien: ausschließlich SQL
+# Erwartete Struktur:
+#   <base_path>/<Jahr>/<Abteilung>/<Auftraggeber>/<Jira-Task>/<name>.sql
+# Der Jira-Task wird aus dem Elternverzeichnis der SQL-Datei abgeleitet.
 scripts:
   base_path: "scripts"
-  extensions: [".py", ".sh", ".sql", ".js", ".ts"]
+  extensions: [".sql"]
   include_subdirectories: true
-  exclude:                 # nicht als Report-Skripte scannen
-    - "__init__.py"
-    - "script_inventory.py"
+  exclude: []
 
 # Task-Filter
 filters:
-  prefix: "CPU-"           # Key-Prefix (clientseitig geprüft)
+  prefix: "JRA-"           # Key-Prefix (clientseitig geprüft)
   min_priority: "medium"
   statuses: ["open", "in progress", "done"]
   exclude_keywords: []
@@ -58,12 +59,17 @@ performance:
   timeout: 30              # Sekunden pro Request
   retry_attempts: 3
 
-# Excel-/CSV-Export
+# Excel-Export
+# Ein Bericht pro Auftrag wird direkt im Task-Verzeichnis abgelegt:
+#   <Jahr>/<Abteilung>/<Auftraggeber>/<Jira-Task>/<Jira-Task>.xlsx
+# Platzhalter für output_filename:
+#   {JIRA}, {SQL}, {YEAR}, {DEPARTMENT}, {CUSTOMER}, {YYYY}, {MM}, {DD}
 excel:
-  output_path: "output"
-  output_filename: "jira_report_{YYYY}_{MM}_{DD}.xlsx"
+  output_path: "output"                       # nur Fallback für leere Berichte
+  output_filename: "{JIRA}.xlsx"              # pro Task im Task-Verzeichnis
+  fallback_filename: "jira_report_{YYYY}_{MM}_{DD}.xlsx"
   include_headers: true
-  include_csv: true        # zusätzlich jira_report_YYYY_MM_DD.csv schreiben
+  include_csv: false                          # optional zusätzlich CSV pro Task
   datetime_format: "%Y-%m-%d %H:%M:%S"
   sheet_name: "Jira-Task-Report"
 

@@ -23,7 +23,10 @@ if str(_ROOT) not in sys.path:
 
 from config import ROOT, load_config, resolve_path  # noqa: E402
 
-DEFAULT_EXTENSIONS = [".py", ".sh", ".sql", ".js", ".ts"]
+DEFAULT_EXTENSIONS = [".sql"]
+
+# Jira-Key-Muster, z. B. JRA-1001 (wird auf den Verzeichnisnamen angewendet).
+TASK_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
 
 IMPORT_PATTERNS = [
     re.compile(r"^\s*import\s+([A-Za-z_][\w.]*)", re.MULTILINE),
@@ -62,7 +65,7 @@ class ScriptAnalyzer:
         exclude: Optional[List[str]] = None,
     ):
         self.extensions = extensions or list(DEFAULT_EXTENSIONS)
-        self.exclude = set(exclude or ["__init__.py", "script_inventory.py"])
+        self.exclude = set(exclude or [])
         self.jira_ref_pattern = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
 
     def scan_directory(self, path: str | Path) -> List[Dict[str, Any]]:
@@ -83,14 +86,24 @@ class ScriptAnalyzer:
         return results
 
     def analyze_file(self, file_path: Path) -> Dict[str, Any]:
-        """Analysiert eine einzelne Datei."""
+        """Analysiert eine einzelne SQL-Datei.
+
+        Die Jira-Referenz wird aus dem Elternverzeichnis abgeleitet:
+        ``.../<Jahr>/<Abteilung>/<Auftraggeber>/<Jira-Task>/<name>.sql``.
+        """
+        task_key = file_path.parent.name.strip().upper()
+        if not TASK_KEY_PATTERN.match(task_key):
+            task_key = ""
+
         analysis: Dict[str, Any] = {
             "path": str(file_path),
             "name": file_path.name,
             "size_bytes": 0,
             "lines": 0,
             "modified_date": "",
-            "jira_refs": [],
+            "task_key": task_key,
+            "task_dir": str(file_path.parent),
+            "jira_refs": [task_key] if task_key else [],
             "technologies": [],
             "kpi_tags": [],
             "db_access": [],
@@ -111,8 +124,9 @@ class ScriptAnalyzer:
             return analysis
 
         analysis["lines"] = len(content.splitlines())
-        analysis["jira_refs"] = sorted(set(self.jira_ref_pattern.findall(content)))
-        analysis["technologies"] = self._detect_technologies(content)
+        analysis["technologies"] = self._detect_technologies(
+            content, file_path.suffix
+        )
         analysis["kpi_tags"] = sorted(
             {
                 match.strip().lower()
@@ -137,8 +151,20 @@ class ScriptAnalyzer:
         return sorted({match for match in matches if match})
 
     @staticmethod
-    def _detect_technologies(content: str) -> List[str]:
-        import sys
+    def _detect_technologies(content: str, suffix: str = ".sql") -> List[str]:
+        """Erkennt Technologien. Für SQL-Dateien inkl. grober Dialekt-Hinweise."""
+        if suffix.lower() == ".sql":
+            technologies = {"SQL"}
+            upper = content.upper()
+            if "PL/PGSQL" in upper or "LANGUAGE PLPGSQL" in upper:
+                technologies.add("PL/pgSQL")
+            if "NVARCHAR" in upper or "\nGO\n" in upper:
+                technologies.add("T-SQL")
+            if "AUTO_INCREMENT" in upper or "ENGINE=" in upper:
+                technologies.add("MySQL")
+            if "VARCHAR2" in upper or "ROWNUM" in upper:
+                technologies.add("Oracle")
+            return sorted(technologies)
 
         names: set[str] = set()
         for pattern in IMPORT_PATTERNS:

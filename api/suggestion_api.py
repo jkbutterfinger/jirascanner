@@ -46,12 +46,12 @@ CONFIG = load_config()
 class JiraTask(BaseModel):
     """Jira Task Model."""
 
-    key: str = Field(..., description="Task ID, z. B. CPU-345")
+    key: str = Field(..., description="Task ID, z. B. JRA-345")
     summary: str = Field(..., description="Task-Zusammenfassung")
     description: str = Field(default="", description="Task-Beschreibung")
     status: str = Field(default="open", description="Aktueller Status")
     type: str = Field(default="story", description="Issue Type")
-    project_key: str = Field(default="CPU", description="Projekt-Key")
+    project_key: str = Field(default="JRA", description="Projekt-Key")
     priority: str = Field(default="medium", description="Priorität")
     jql: str = Field(default="", description="Zugehörige JQL-Abfrage")
     created: str = Field(default="", description="Erstellungsdatum")
@@ -251,7 +251,7 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(
     title="Jira Scanner API",
     description="API für Task-Scanner, Script-Inventar und Requirements-Matching",
-    version="1.1.0",
+    version="1.2.0",
     lifespan=lifespan,
 )
 

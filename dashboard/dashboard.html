@@ -58,7 +58,7 @@
         <div id="message"></div>
 
         <div class="stats-grid">
-            <div class="stat-card"><h3>📄 Scripts im Inventar</h3><div class="number" id="total-scripts">0</div></div>
+            <div class="stat-card"><h3>📄 SQL-Dateien im Inventar</h3><div class="number" id="total-scripts">0</div></div>
             <div class="stat-card"><h3>🎯 Erledigte Tasks</h3><div class="number" id="matched-tasks">0</div></div>
             <div class="stat-card"><h3>⚠️ Offene Tasks (Gaps)</h3><div class="number" id="missing-reqs">0</div></div>
             <div class="stat-card"><h3>📊 Abschlussquote</h3><div class="number" id="match-rate">0%</div></div>
@@ -72,7 +72,7 @@
             </div>
             <div class="module-panel">
                 <h2>📂 Script-Inventar</h2>
-                <div class="module-content" id="scripts-list"><div class="loading">Lade Scripts…</div></div>
+                <div class="module-content" id="scripts-list"><div class="loading">Lade SQL-Dateien…</div></div>
             </div>
         </div>
 
@@ -86,7 +86,7 @@
             <form id="suggestion-form">
                 <div class="field">
                     <label for="task-id">Task-ID (Jira-Key)</label>
-                    <input type="text" id="task-id" placeholder="z. B. CPU-1001" required>
+                    <input type="text" id="task-id" placeholder="z. B. JRA-1001" required>
                 </div>
                 <div class="field">
                     <label for="suggestion-title">Titel</label>
@@ -195,7 +195,7 @@
         function renderScripts() {
             const container = document.getElementById('scripts-list');
             if (!scriptsData.length) {
-                container.innerHTML = '<div class="loading">Keine Scripts gefunden.</div>';
+                container.innerHTML = '<div class="loading">Keine SQL-Dateien gefunden.</div>';
                 return;
             }
             let html = '<table class="table"><thead><tr><th>Datei</th><th>Jira-Referenzen</th><th>Zeilen</th></tr></thead><tbody>';

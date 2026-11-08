@@ -39,8 +39,8 @@ DEFAULTS: Dict[str, Any] = {
         "cors_origins": ["http://localhost:8000", "http://127.0.0.1:8000"],
     },
     "project": {
-        "key": "CPU",
-        "name": "Capacity Planning",
+        "key": "JRA",
+        "name": "Jira Reporting",
         "jql": "",
     },
     "storage": {
@@ -51,12 +51,13 @@ DEFAULTS: Dict[str, Any] = {
     },
     "scripts": {
         "base_path": str(ROOT / "scripts"),
-        "extensions": [".py", ".sh", ".sql", ".js", ".ts"],
+        # Es werden ausschließlich SQL-Dateien gescannt.
+        "extensions": [".sql"],
         "include_subdirectories": True,
-        "exclude": ["__init__.py", "script_inventory.py"],
+        "exclude": [],
     },
     "filters": {
-        "prefix": "CPU-",
+        "prefix": "JRA-",
         "min_priority": "medium",
         "statuses": ["open", "in progress", "done"],
         "exclude_keywords": [],
@@ -67,10 +68,13 @@ DEFAULTS: Dict[str, Any] = {
         "retry_attempts": 3,
     },
     "excel": {
+        # Fallback-Ordner nur für leere Berichte ohne Task-Verzeichnis.
         "output_path": str(ROOT / "output"),
-        "output_filename": "jira_report_{YYYY}_{MM}_{DD}.xlsx",
+        # Ein Excel-Bericht pro Auftrag, abgelegt im Task-Verzeichnis.
+        "output_filename": "{JIRA}.xlsx",
+        "fallback_filename": "jira_report_{YYYY}_{MM}_{DD}.xlsx",
         "include_headers": True,
-        "include_csv": True,
+        "include_csv": False,
         "datetime_format": "%Y-%m-%d %H:%M:%S",
         "sheet_name": "Jira-Task-Report",
     },

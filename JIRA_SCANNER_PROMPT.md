@@ -2,11 +2,12 @@
 JIRA/GIRA SCANNER - SYSTEM- UND NUTZUNGSDOKUMENTATION
 ================================================================================
 
-SYSTEMBEZEICHNUNG : Jira/Gira Scanner with Excel/CSV Export
-VERSION           : 1.1.0
+SYSTEMBEZEICHNUNG : Jira/Gira Scanner for SQL files with per-task Excel export
+VERSION           : 1.2.0
 PYTHON            : >= 3.9
 LIZENZ            : MIT
 HAUPTEINSTIEG     : main.py
+STANDARD-PREFIX   : JRA-
 
 Dieses Dokument beschreibt den tatsächlichen Stand der Implementierung.
 Es ist mit main.py, config.py, config.yaml und der API synchron zu halten.
@@ -15,17 +16,33 @@ Es ist mit main.py, config.py, config.yaml und der API synchron zu halten.
 1. ZWECK
 ================================================================================
 
-Der Scanner analysiert Jira-Tasks mit einem konfigurierbaren Key-Prefix
-(Standard: "CPU-"), verknüpft sie mit lokalen Skripten und erzeugt daraus
-einen Excel-Bericht. Optional wird zusätzlich eine CSV-Datei geschrieben.
+Der Scanner sucht ausschließlich SQL-Dateien in einer definierten
+Verzeichnisstruktur. Die Jira-Referenz wird aus dem Verzeichnisnamen
+abgeleitet - nicht aus dem Dateiinhalt. Für jeden Jira-Task (Auftrag)
+wird ein eigener Excel-Bericht direkt im Task-Verzeichnis abgelegt.
+
+Erwartete Struktur:
+
+  /mount/<Jahr>/<Abteilung>/<Auftraggeber>/<Jira-Task>/<name>.sql
+
+Beispiel:
+
+  /mount/2024/IT/ACME/JRA-1001/monthly_sales.sql
+  /mount/2024/IT/ACME/JRA-1001/etl_refresh.sql
+  /mount/2024/IT/ACME/JRA-1002/export.sql
+
+Der Task-Key ist der Name des Elternverzeichnisses der SQL-Datei.
+Der Excel-Bericht wird dort abgelegt:
+
+  /mount/2024/IT/ACME/JRA-1001/JRA-1001.xlsx
 
 Er liefert:
 - Task-Zuweisungen (Auftraggeber, Entwickler)
 - Status und Priorität
 - Abschlussdatum
 - Zusammenfassung der Anforderung
-- gefundene Script-Dateien inkl. Änderungsdatum
-- erkannte Technologien
+- gefundene SQL-Dateien inkl. Änderungsdatum
+- erkannte Technologien (SQL und Dialekt-Hinweise)
 - eine einfache Gap-/Matching-Sicht über die FastAPI-API
 
 ================================================================================
@@ -35,9 +52,9 @@ Er liefert:
 main.py
   Kanonische Implementierung:
   - JiraClient       : Jira REST API v3, Pagination, Retry, ADF-Parsing
-  - ScriptScanner    : einmaliger Script-Scan + Index nach Jira-Referenz
-  - ExcelExporter    : XLSX- und CSV-Export
-  - build_report()   : Zusammenführung Task <-> Script
+  - ScriptScanner    : SQL-Scan + Index nach Task-Verzeichnis
+  - ExcelExporter    : ein XLSX-Bericht pro Task im Task-Verzeichnis
+  - build_report()   : Zusammenführung Task <-> SQL-Dateien
   - main()           : CLI-Einstiegspunkt
 
 config.py
@@ -54,16 +71,16 @@ scanner/main_scanner.py
 
 scripts/script_inventory.py
   ScriptAnalyzer, JiraMapper, ReportGenerator sowie ein eigenes CLI
-  für das Script-Inventar.
+  für das SQL-Inventar.
 
 api/suggestion_api.py
   FastAPI-Service unter dem Prefix /api inkl. Auslieferung des Dashboards.
 
 dashboard/dashboard.html
-  Weboberfläche für Tasks, Script-Inventar und Suggestions.
+  Weboberfläche für Tasks, SQL-Inventar und Suggestions.
 
 tests/test_smoke.py
-  Smoke-Tests für Parsing, Matching, Export und API.
+  Smoke-Tests für Parsing, Task-Key-Ableitung, Matching, Export und API.
 
 config.yaml        Konfiguration (Token leer lassen, siehe Sicherheit)
 run.sh             Startskript mit Vorabprüfungen
@@ -112,17 +129,17 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
     cors_origins: [...]        # Origins für die API
 
   project:
-    key: "CPU"                 # Task-Keys beginnen mit "CPU-"
+    key: "JRA"                 # Task-Keys beginnen mit "JRA-"
     jql: ""                    # optional: eigene JQL statt project.key
 
   scripts:
-    base_path: "scripts"
-    extensions: [".py", ".sh", ".sql", ".js", ".ts"]
+    base_path: "/mount"        # Root der Verzeichnisstruktur
+    extensions: [".sql"]       # ausschließlich SQL
     include_subdirectories: true
-    exclude: ["__init__.py", "script_inventory.py"]
+    exclude: []
 
   filters:
-    prefix: "CPU-"             # clientseitiger Key-Filter
+    prefix: "JRA-"             # clientseitiger Key-Filter
 
   performance:
     max_results: 1000          # Obergrenze über alle Seiten
@@ -130,9 +147,10 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
     retry_attempts: 3
 
   excel:
-    output_path: "output"
-    output_filename: "jira_report_{YYYY}_{MM}_{DD}.xlsx"
-    include_csv: true
+    output_path: "output"                        # nur Fallback
+    output_filename: "{JIRA}.xlsx"               # pro Task im Task-Ordner
+    fallback_filename: "jira_report_{YYYY}_{MM}_{DD}.xlsx"
+    include_csv: false
     datetime_format: "%Y-%m-%d %H:%M:%S"
     sheet_name: "Jira-Task-Report"
 
@@ -158,28 +176,43 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
 4.3 Verhalten ohne gültige Konfiguration
 
   Fehlt URL oder Token (oder steht noch "your-jira-server"), wird eine
-  Warnung geloggt und ein leerer Bericht mit Hinweiszeile erzeugt.
-  Das Tool bricht nicht ab.
+  Warnung geloggt und ein leerer Fallback-Bericht mit Hinweiszeile
+  unter excel.output_path erzeugt. Das Tool bricht nicht ab.
+
+4.4 Dateiname des Excel-Berichts
+
+  excel.output_filename unterstützt folgende Platzhalter:
+
+    {JIRA}        Jira-Task-Key, z. B. JRA-1001
+    {SQL}         Dateiname (ohne .sql) der ersten SQL-Datei
+    {YEAR}        Jahr aus der Verzeichnisstruktur
+    {DEPARTMENT}  Abteilung aus der Verzeichnisstruktur
+    {CUSTOMER}    Auftraggeber aus der Verzeichnisstruktur
+    {YYYY}        aktuelles Jahr
+    {MM}          aktueller Monat
+    {DD}          aktueller Tag
+
+  Standard: "{JIRA}.xlsx" -> /mount/2024/IT/ACME/JRA-1001/JRA-1001.xlsx
 
 ================================================================================
 5. NUTZUNG
 ================================================================================
 
-5.1 Bericht erzeugen
+5.1 Berichte erzeugen
 
   python3 main.py
   ./run.sh
   python3 main.py --dry-run          # nur Konsole, keine Datei
-  python3 main.py --prefix CPU- -v   # DEBUG-Logging
+  python3 main.py --prefix JRA- -v   # DEBUG-Logging
   python3 main.py --config other.yaml
 
   run.sh prüft Abhängigkeiten, legt output/, logs/, inventory/ und
   jira_data/ an und gibt den Exit-Code von main.py weiter.
 
-5.2 Script-Inventar
+5.2 SQL-Inventar
 
   python3 scripts/script_inventory.py
-  python3 scripts/script_inventory.py --path /pfad/zu/scripts --json
+  python3 scripts/script_inventory.py --path /mount --json
 
 5.3 API + Dashboard
 
@@ -194,6 +227,7 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
 5.4 Tests
 
   pytest
+  ruff check .
 
 ================================================================================
 6. ABLAUF / TECHNISCHE DETAILS
@@ -216,37 +250,53 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
 
   Die JQL lädt das Projekt (project.key bzw. project.jql). Anschließend
   wird jeder Task-Key clientseitig gegen filters.prefix geprüft.
-  Beispiel: Prefix "CPU-" akzeptiert "CPU-1001", nicht "OPS-1001".
+  Beispiel: Prefix "JRA-" akzeptiert "JRA-1001", nicht "OPS-1001".
 
-6.3 Script-Scan und Matching
+6.3 SQL-Scan und Task-Zuordnung
 
-  1) Alle Dateien unter scripts.base_path mit den konfigurierten
-     Endungen werden gefunden (optional rekursiv).
+  1) Es werden ausschließlich Dateien mit den Endungen aus
+     scripts.extensions gefunden. Standard: [".sql"].
   2) Dateien in scripts.exclude werden übersprungen.
-  3) Jede Datei wird genau EINMAL gelesen.
-  4) Jira-Referenzen werden per Regex [A-Z][A-Z0-9]+-\d+ erkannt.
-  5) Der Index lautet: Jira-Key -> Liste von Script-Infos.
-  6) Für jeden Task werden alle passenden Scripts zusammengeführt:
-     - File-Location: alle Pfade (mehrzeilig)
-     - File-Datum: Änderungsdatum des ersten Treffers (YYYY-MM-DD)
-     - Verwendete-Technologien: erkannte Imports ohne Standardbibliothek
-  7) Kein Treffer -> File-Location = "Not found".
-
-  Dadurch entfällt das frühere O(Tasks × Scripts)-Verhalten.
+  3) Jede SQL-Datei wird genau EINMAL gelesen.
+  4) Der Task-Key wird aus dem Elternverzeichnis abgeleitet:
+       .../<Jahr>/<Abteilung>/<Auftraggeber>/<Jira-Task>/<name>.sql
+     Der Verzeichnisname muss dem Muster [A-Z][A-Z0-9]+-\d+ entsprechen.
+  5) Der Index lautet: Jira-Key -> Liste von SQL-Infos.
+  6) Für jeden Task werden alle SQL-Dateien in seinem Verzeichnis
+     zusammengeführt:
+       - File-Location: Pfad der jeweiligen SQL-Datei
+       - File-Datum: Änderungsdatum (YYYY-MM-DD)
+       - Verwendete-Technologien: SQL plus erkannte Dialekt-Hinweise
+  7) Liegt eine SQL-Datei nicht in einem Task-Verzeichnis, wird sie mit
+     einer Warnung ignoriert.
+  8) Kein Treffer -> File-Location = "Not found".
 
 6.4 Technologie-Erkennung
 
-  Erkannt werden:
-  - Python: "import x", "import x.y", "from x.y import z"
-  - JavaScript: require("...")
-  Standardbibliothek und Builtins werden herausgefiltert.
+  Für SQL-Dateien:
+  - Basis: "SQL"
+  - Zusätzlich erkannt: "PL/pgSQL", "T-SQL", "MySQL", "Oracle"
+    anhand typischer Schlüsselwörter.
   Ausgabe: sortierte, eindeutige Liste (max. 8 im Excel-Bericht).
 
 ================================================================================
-7. EXCEL-/CSV-AUSGABE
+7. EXCEL-AUSGABE
 ================================================================================
 
-7.1 Spalten (alle nebeneinander, eine Zeile pro Task)
+7.1 Ablage
+
+  Pro Jira-Task genau eine Excel-Datei im Task-Verzeichnis:
+
+    /mount/<Jahr>/<Abteilung>/<Auftraggeber>/<Jira-Task>/<Jira-Task>.xlsx
+
+  Enthält ein Task-Verzeichnis mehrere SQL-Dateien, stehen sie als
+  mehrere Zeilen im selben Excel-Bericht.
+
+  Nur wenn keine Tasks/SQL-Dateien gefunden werden, wird ein leerer
+  Fallback-Bericht unter excel.output_path geschrieben:
+    <output_path>/jira_report_YYYY_MM_DD.xlsx
+
+7.2 Spalten (alle nebeneinander, eine Zeile pro SQL-Datei)
 
   +----------------+---------------------+----------------+-------------------------------+
   | Jira-Nummer    | Jira-Auftraggeber   | Entwickler     | Jahr/Monat/Tag-Abgeschlossen  |
@@ -269,13 +319,16 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
    9 Status                         14
   10 Priorität                      12
 
-7.2 Beispiel (side-by-side)
+7.3 Beispiel (side-by-side)
 
-  Jira-Nummer | Jira-Auftraggeber | Entwickler  | Jahr/Monat/Tag-Abgeschlossen | Zusammenfassung-Anforderung | File-Datum | File-Location                               | Verwendete-Technologien | Status      | Priorität
-  CPU-1001    | Max Mustermann    | Anna Meier  | 2024-02-01 10:00:00          | Monthly Sales Dashboard     | 2024-01-10 | /mount/drive/folder/report_monthly_sales.py | pandas, requests        | Done        | High
-  CPU-1002    | Lisa Schmidt      | Tom Mueller | Pending                      | ETL Pipeline                | 2024-01-12 | /mount/drive/folder/etl.py                  | sqlalchemy              | In Progress | Medium
+  Datei: /mount/2024/IT/ACME/JRA-1001/JRA-1001.xlsx
 
-7.3 Formatierung
+  Jira-Nummer | Jira-Auftraggeber | Entwickler  | Jahr/Monat/Tag-Abgeschlossen | Zusammenfassung-Anforderung | File-Datum | File-Location                                  | Verwendete-Technologien | Status      | Priorität
+  JRA-1001    | Max Mustermann    | Anna Meier  | 2024-02-01 10:00:00          | Monthly Sales Dashboard     | 2024-01-10 | /mount/2024/IT/ACME/JRA-1001/monthly_sales.sql | SQL                     | Done        | High
+  JRA-1001    | Max Mustermann    | Anna Meier  | 2024-02-01 10:00:00          | Monthly Sales Dashboard     | 2024-01-12 | /mount/2024/IT/ACME/JRA-1001/etl_refresh.sql   | SQL                     | Done        | High
+  JRA-1002    | Lisa Schmidt      | Tom Mueller | Pending                      | ETL Pipeline                | 2024-01-15 | /mount/2024/IT/ACME/JRA-1002/export.sql        | SQL                     | In Progress | Medium
+
+7.4 Formatierung
 
   - Kopfzeile: blau (4472C4), weiß, fett, zentriert, mit Rahmen
   - Datenzellen: dünne Rahmen, vertikal zentriert
@@ -283,17 +336,15 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
   - Umbruch für Summary, File-Location und Technologien
   - Freeze-Panes auf A2
   - AutoFilter über den Datenbereich
-  - Summenzeile "GESAMT" mit Anzahl der Tasks
+  - Summenzeile "GESAMT" mit Anzahl der SQL-Dateien
   - Datumsformat aus excel.datetime_format (Standard: YYYY-MM-DD HH:MM:SS)
 
-7.4 Dateien
+7.5 CSV (optional)
 
-  Excel : <output_path>/jira_report_YYYY_MM_DD.xlsx
-  CSV   : <output_path>/jira_report_YYYY_MM_DD.csv  (wenn include_csv=true)
-  CSV-Format: UTF-8 mit BOM, Semikolon als Trennzeichen
-
-  Der Dateiname kommt aus excel.output_filename; unterstützte Platzhalter:
-  {YYYY}, {MM}, {DD}.
+  Wenn excel.include_csv=true, wird zusätzlich pro Task eine CSV neben
+  dem Excel-Bericht geschrieben:
+    <Jira-Task>.csv
+  Format: UTF-8 mit BOM, Semikolon als Trennzeichen.
 
 ================================================================================
 8. API-ENDPUNKTE
@@ -312,10 +363,10 @@ Alle fachlichen Endpunkte liegen unter /api:
        Task in inventory/suggestions.json speichern.
 
   GET  /api/scripts?path=...
-       Script-Inventar scannen (Default: scripts.base_path).
+       SQL-Inventar scannen (Default: scripts.base_path).
 
   POST /api/scripts/analyze?path=...
-       Einzelne Datei analysieren.
+       Einzelne SQL-Datei analysieren.
 
   GET  /api/suggestions
        Suggestions auflisten.
@@ -326,11 +377,11 @@ Alle fachlichen Endpunkte liegen unter /api:
   POST /api/suggestions/batch
        Mehrere Suggestions anlegen.
 
-  GET  /api/gaps?task_keys=CPU-1001
-       Einfache Gap-Analyse: existiert ein Script mit dieser Referenz?
+  GET  /api/gaps?task_keys=JRA-1001
+       Einfache Gap-Analyse: existiert eine SQL-Datei mit dieser Referenz?
 
-  GET  /api/match?task_key=CPU-1001&script_path=...
-       Task gegen Scripts matchen (match_score 1.0 oder 0.0).
+  GET  /api/match?task_key=JRA-1001&script_path=...
+       Task gegen SQL-Dateien matchen (match_score 1.0 oder 0.0).
 
   GET  /
        Liefert dashboard/dashboard.html aus.
@@ -342,13 +393,15 @@ und Detailmeldung zurückgegeben.
 9. FEHLERBEHANDLUNG UND LOGGING
 ================================================================================
 
-  Jira nicht konfiguriert       -> Warnung + leerer Bericht
-  Jira nicht erreichbar / 5xx   -> Retries, danach Warnung + leerer Bericht
-  HTTP 401/403                  -> Fehlermeldung, leerer Bericht
-  Scripts-Pfad fehlt            -> Warnung, File-Location = "Not found"
-  Einzelnes Script unlesbar     -> Warnung, restliche Scripts laufen weiter
-  Excel nicht schreibbar        -> Exit-Code 1 + Logeintrag
-  Ungültige config.yaml         -> ValueError mit Pfadangabe
+  Jira nicht konfiguriert            -> Warnung + leerer Fallback-Bericht
+  Jira nicht erreichbar / 5xx        -> Retries, danach Warnung + Fallback
+  HTTP 401/403                       -> Fehlermeldung, Fallback-Bericht
+  Scan-Root fehlt                    -> Warnung, keine Berichte
+  SQL außerhalb Task-Verzeichnis     -> Warnung, Datei wird ignoriert
+  Task ohne SQL-Datei                -> Warnung, kein Bericht für den Task
+  Einzelne SQL-Datei unlesbar        -> Warnung, restliche Dateien laufen weiter
+  Excel nicht schreibbar             -> Exit-Code 1 + Logeintrag
+  Ungültige config.yaml              -> ValueError mit Pfadangabe
 
   Logging:
   - Console (Level aus logging.level, mit -v auf DEBUG)
@@ -383,22 +436,23 @@ und Detailmeldung zurückgegeben.
   PROBLEM: Keine Tasks gefunden
   LÖSUNG:
   - JQL/project.key prüfen
-  - filters.prefix prüfen (Standard "CPU-")
+  - filters.prefix prüfen (Standard "JRA-")
   - API-Berechtigungen des Tokens prüfen
   - Mit -v laufen lassen und logs/jira_scanner.log ansehen
+
+  PROBLEM: Keine SQL-Dateien gefunden
+  LÖSUNG:
+  - scripts.base_path prüfen (z. B. "/mount")
+  - scripts.extensions prüfen (Standard [".sql"])
+  - Verzeichnisstruktur prüfen:
+      <Jahr>/<Abteilung>/<Auftraggeber>/<Jira-Task>/<name>.sql
+  - Task-Verzeichnisname muss dem Muster JRA-1234 entsprechen
 
   PROBLEM: Excel-Export schlägt fehl
   LÖSUNG:
   - pip install -r requirements.txt
-  - Schreibrechte auf excel.output_path prüfen
+  - Schreibrechte auf dem Task-Verzeichnis bzw. excel.output_path prüfen
   - Python-Version >= 3.9 prüfen
-
-  PROBLEM: Scripts werden nicht gefunden
-  LÖSUNG:
-  - scripts.base_path prüfen
-  - scripts.extensions prüfen
-  - scripts.exclude prüfen
-  - Jira-Referenz im Script prüfen (z. B. "# CPU-1001")
 
   PROBLEM: API startet nicht
   LÖSUNG:
@@ -417,15 +471,19 @@ und Detailmeldung zurückgegeben.
   - ADF- und Datums-Parsing
   - Jira-Response-Verarbeitung inkl. Prefix-Filter
   - Verhalten ohne gültige Jira-Konfiguration
-  - Script-Index und Report-Zusammenführung
-  - Excel-/CSV-Export inkl. Header und Summenzeile
-  - ScriptAnalyzer
+  - Task-Key-Ableitung aus der Verzeichnisstruktur
+  - SQL-Index und Report-Zusammenführung
+  - Excel-Export pro Task inkl. Header und Summenzeile
+  - Dateinamen-Platzhalter
+  - ScriptAnalyzer (nur SQL)
   - API-Endpunkte (Health, Suggestions, Gaps, Dashboard)
 
 ================================================================================
 13. BEKANNTE GRENZEN / ROADMAP
 ================================================================================
 
+  - Es werden ausschließlich .sql-Dateien berücksichtigt.
+  - Die Task-Zuordnung hängt strikt an der Verzeichnisstruktur.
   - Confluence-Integration ist nur als Config-Block vorhanden.
   - Gap-Analyse ist eine Referenzprüfung, kein semantisches Matching.
   - Kein Rückschreiben nach Jira.

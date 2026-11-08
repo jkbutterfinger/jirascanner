@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jira-scanner"
-version = "1.1.0"
-description = "Jira/Gira Task Scanner with Excel/CSV export for CPU- prefix tasks"
+version = "1.2.0"
+description = "Jira task scanner for SQL files with per-task Excel export"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }

@@ -19,24 +19,42 @@ from main import (
     ScriptScanner,
     adf_to_text,
     build_report,
+    derive_path_context,
     empty_report_row,
     format_datetime,
+    task_key_from_directory,
 )
 from scripts.script_inventory import ScriptAnalyzer
 
 BASE_CONFIG = {
     "server": {"url": "https://jira.example.com"},
     "api": {"token": "test-token", "cors_origins": ["http://localhost:8000"]},
-    "project": {"key": "CPU", "jql": ""},
-    "filters": {"prefix": "CPU-"},
+    "project": {"key": "JRA", "jql": ""},
+    "filters": {"prefix": "JRA-"},
     "performance": {"max_results": 50, "timeout": 1, "retry_attempts": 1},
     "scripts": {
         "base_path": "scripts",
-        "extensions": [".py"],
+        "extensions": [".sql"],
         "include_subdirectories": True,
         "exclude": [],
     },
 }
+
+EXCEL_CONFIG = {
+    "output_path": "output",
+    "output_filename": "{JIRA}.xlsx",
+    "fallback_filename": "jira_report_{YYYY}_{MM}_{DD}.xlsx",
+    "include_csv": False,
+    "sheet_name": "Test",
+    "datetime_format": "%Y-%m-%d %H:%M:%S",
+}
+
+
+def _write_file(directory: Path, name: str, content: str) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / name
+    path.write_text(content, encoding="utf-8")
+    return path
 
 
 def test_adf_to_text_and_datetime() -> None:
@@ -59,7 +77,7 @@ def test_adf_to_text_and_datetime() -> None:
 def test_jira_client_parses_issues_and_filters_prefix() -> None:
     raw = [
         {
-            "key": "CPU-1001",
+            "key": "JRA-1001",
             "fields": {
                 "summary": "Monthly Sales Dashboard",
                 "status": {"name": "Done"},
@@ -89,7 +107,7 @@ def test_jira_client_parses_issues_and_filters_prefix() -> None:
 
     assert len(tasks) == 1
     task = tasks[0]
-    assert task.key == "CPU-1001"
+    assert task.key == "JRA-1001"
     assert task.priority == "High"
     assert task.reporter == "Max Mustermann"
     assert task.assignee == "Anna Meier"
@@ -102,84 +120,124 @@ def test_jira_client_without_config_returns_empty() -> None:
     assert JiraClient(config).search_tasks() == []
 
 
-def _write_script(directory: Path, name: str, content: str) -> Path:
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / name
-    path.write_text(content, encoding="utf-8")
-    return path
+def test_task_key_and_path_context_from_directory(tmp_path: Path) -> None:
+    task_dir = tmp_path / "2024" / "IT" / "ACME" / "JRA-1001"
+    assert task_key_from_directory(task_dir) == "JRA-1001"
+    assert task_key_from_directory(tmp_path / "kein-task") == ""
+
+    context = derive_path_context(task_dir)
+    assert context == {"YEAR": "2024", "DEPARTMENT": "IT", "CUSTOMER": "ACME"}
 
 
-def test_script_scanner_and_report(tmp_path: Path) -> None:
-    scripts_dir = tmp_path / "scripts"
-    _write_script(
-        scripts_dir,
-        "report_monthly_sales.py",
-        "import pandas\nimport requests\n\n# Umsetzung für CPU-1001\n",
-    )
-    _write_script(scripts_dir, "unrelated.py", "print('nichts')\n")
+def test_script_scanner_uses_directory_structure(tmp_path: Path) -> None:
+    mount = tmp_path / "mount"
+    task_dir = mount / "2024" / "IT" / "ACME" / "JRA-1001"
+    _write_file(task_dir, "report.sql", "SELECT * FROM sales;\n")
+    _write_file(task_dir, "notes.txt", "JRA-9999\n")  # keine SQL-Datei
+    _write_file(mount / "2024" / "IT" / "ACME", "loose.sql", "SELECT 1;\n")
 
-    config = {**BASE_CONFIG, "scripts": {**BASE_CONFIG["scripts"], "base_path": str(scripts_dir)}}
-    scanner = ScriptScanner(config)
-    tasks = [
-        JiraIssue(
-            key="CPU-1001",
-            summary="Monthly Sales Dashboard",
-            status="Done",
-            priority="High",
-            reporter="Max",
-            assignee="Anna",
-            resolved="2024-02-01T10:00:00.000+0000",
-        )
-    ]
-
-    rows = build_report(tasks, scanner)
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["Jira-Nummer"] == "CPU-1001"
-    assert row["File-Location"].endswith("report_monthly_sales.py")
-    assert "pandas" in row["Verwendete-Technologien"]
-    assert "requests" in row["Verwendete-Technologien"]
-    assert row["File-Datum"]
-    assert row["Jahr/Monat/Tag-Abgeschlossen"] == "2024-02-01 10:00:00"
-
-
-def test_excel_and_csv_export(tmp_path: Path) -> None:
     config = {
-        "excel": {
-            "output_path": str(tmp_path / "output"),
-            "output_filename": "jira_report_{YYYY}_{MM}_{DD}.xlsx",
-            "include_csv": True,
-            "sheet_name": "Test",
-            "datetime_format": "%Y-%m-%d %H:%M:%S",
-        }
+        **BASE_CONFIG,
+        "scripts": {**BASE_CONFIG["scripts"], "base_path": str(mount)},
     }
-    exporter = ExcelExporter(config)
-    rows = [empty_report_row("CPU-")]
-    rows[0]["Jira-Nummer"] = "CPU-1001"
+    scanner = ScriptScanner(config)
+    task = JiraIssue(
+        key="JRA-1001",
+        summary="Monthly Sales Dashboard",
+        status="Done",
+        priority="High",
+        reporter="Max",
+        assignee="Anna",
+        resolved="2024-02-01T10:00:00.000+0000",
+    )
 
-    path = Path(exporter.export(rows))
+    matches = scanner.get_task_info(task)
+    assert len(matches) == 1
+    assert matches[0]["path"].endswith("report.sql")
+    assert matches[0]["task_key"] == "JRA-1001"
+    assert matches[0]["technologies"] == ["SQL"]
+    assert scanner.get_task_directory(task) == task_dir
+
+    rows = build_report([task], scanner)
+    assert len(rows) == 1
+    assert rows[0]["Jira-Nummer"] == "JRA-1001"
+    assert rows[0]["File-Location"].endswith("report.sql")
+    assert rows[0]["File-Datum"]
+    assert rows[0]["Jahr/Monat/Tag-Abgeschlossen"] == "2024-02-01 10:00:00"
+
+
+def test_export_per_task_into_task_directory(tmp_path: Path) -> None:
+    task_dir = tmp_path / "2024" / "IT" / "ACME" / "JRA-1001"
+    task_dir.mkdir(parents=True)
+    exporter = ExcelExporter({"excel": EXCEL_CONFIG})
+
+    rows = [empty_report_row("JRA-")]
+    rows[0]["Jira-Nummer"] = "JRA-1001"
+    rows[0]["File-Location"] = str(task_dir / "report.sql")
+
+    path = Path(
+        exporter.export_task(
+            "JRA-1001",
+            rows,
+            task_dir,
+            sql_stem="report",
+            path_context=derive_path_context(task_dir),
+        )
+    )
+    assert path == task_dir / "JRA-1001.xlsx"
     assert path.exists()
-    assert path.with_suffix(".csv").exists()
 
     worksheet = load_workbook(path).active
     assert worksheet.cell(1, 1).value == "Jira-Nummer"
     assert worksheet.cell(1, 10).value == "Priorität"
-    assert worksheet.cell(2, 1).value == "CPU-1001"
+    assert worksheet.cell(2, 1).value == "JRA-1001"
     assert worksheet.cell(3, 1).value == "GESAMT"
 
 
-def test_script_analyzer(tmp_path: Path) -> None:
-    scripts_dir = tmp_path / "scripts"
-    _write_script(
-        scripts_dir,
-        "demo.py",
-        "import pandas\nimport requests\n\n# CPU-2002\n# KPI: umsatz\n",
+def test_export_filename_placeholders(tmp_path: Path) -> None:
+    task_dir = tmp_path / "2024" / "IT" / "ACME" / "JRA-1001"
+    task_dir.mkdir(parents=True)
+    config = {
+        "excel": {
+            **EXCEL_CONFIG,
+            "output_filename": "{YEAR}_{DEPARTMENT}_{CUSTOMER}_{JIRA}.xlsx",
+        }
+    }
+    exporter = ExcelExporter(config)
+    path = Path(
+        exporter.export_task(
+            "JRA-1001",
+            [empty_report_row("JRA-")],
+            task_dir,
+            sql_stem="report",
+            path_context=derive_path_context(task_dir),
+        )
     )
-    analyzer = ScriptAnalyzer(extensions=[".py"], exclude=[])
-    inventory = analyzer.scan_directory(scripts_dir)
+    assert path.name == "2024_IT_ACME_JRA-1001.xlsx"
+
+
+def test_fallback_export_for_empty_report(tmp_path: Path) -> None:
+    config = {"excel": {**EXCEL_CONFIG, "output_path": str(tmp_path / "output")}}
+    exporter = ExcelExporter(config)
+    path = Path(exporter.export([empty_report_row("JRA-")]))
+    assert path.exists()
+    assert path.name.startswith("jira_report_")
+    assert path.suffix == ".xlsx"
+
+
+def test_script_analyzer_only_sql_and_directory_reference(tmp_path: Path) -> None:
+    mount = tmp_path / "mount"
+    task_dir = mount / "2024" / "IT" / "ACME" / "JRA-2002"
+    _write_file(task_dir, "demo.sql", "SELECT 1;\n-- KPI: umsatz\n")
+    _write_file(task_dir, "demo.py", "import pandas\n# JRA-9999\n")
+
+    analyzer = ScriptAnalyzer(extensions=[".sql"], exclude=[])
+    inventory = analyzer.scan_directory(mount)
     assert len(inventory) == 1
-    assert inventory[0]["jira_refs"] == ["CPU-2002"]
-    assert "pandas" in inventory[0]["technologies"]
+    assert inventory[0]["name"] == "demo.sql"
+    assert inventory[0]["jira_refs"] == ["JRA-2002"]
+    assert inventory[0]["task_key"] == "JRA-2002"
+    assert "SQL" in inventory[0]["technologies"]
     assert "api_calls" in inventory[0]
 
 
@@ -198,7 +256,7 @@ def test_api_endpoints(tmp_path: Path) -> None:
         json={
             "title": "Test",
             "description": "Beschreibung",
-            "task_id": "CPU-1001",
+            "task_id": "JRA-1001",
             "severity": "high",
         },
     )
@@ -209,7 +267,7 @@ def test_api_endpoints(tmp_path: Path) -> None:
     assert listed.status_code == 200
     assert listed.json()["count"] == 1
 
-    gaps = client.get("/api/gaps", params={"task_keys": "CPU-1001"})
+    gaps = client.get("/api/gaps", params={"task_keys": "JRA-1001"})
     assert gaps.status_code == 200
     assert gaps.json()["count"] == 1
 
