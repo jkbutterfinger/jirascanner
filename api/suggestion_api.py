@@ -289,10 +289,30 @@ def create_task(task: JiraTask) -> Dict[str, Any]:
 
 @router.get("/scripts")
 def get_scripts(path: Optional[str] = None) -> Dict[str, Any]:
-    """Scannt das SQL-Verzeichnis und liefert das Inventar."""
+    """Liefert das SQL-Inventar. Nutzt bevorzugt den pre-generierten Scan-Index."""
+    if not path:
+        from main import load_scan_index
+        index_data = load_scan_index(CONFIG)
+        if index_data and "files" in index_data:
+            try:
+                idx_base = Path(index_data.get("base_path", "")).resolve()
+                same_path = idx_base == Path(_script_path()).resolve()
+            except Exception:
+                same_path = False
+            if same_path:
+                num_files = len(index_data["files"])
+                LOGGER.info("SQL-Inventar aus Scan-Index geladen (%s Dateien)", num_files)
+                return {
+                    "scripts": index_data["files"],
+                    "count": num_files,
+                    "path": index_data.get("base_path", str(_script_path())),
+                    "source": "index"
+                }
+
     target = resolve_path(path) if path else _script_path()
+    LOGGER.info("SQL-Verzeichnis wird live gescannt: %s", target)
     scripts = _analyzer().analyze_directory(target)
-    return {"scripts": scripts, "count": len(scripts), "path": str(target)}
+    return {"scripts": scripts, "count": len(scripts), "path": str(target), "source": "live"}
 
 
 @router.post("/scripts/analyze")

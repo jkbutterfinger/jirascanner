@@ -77,7 +77,7 @@ excel:
   output_filename: "{JIRA}.xlsx"              # pro Task (nur bei aggregate_report: false)
   fallback_filename: "jira_report_{YYYY}_{MM}_{DD}.xlsx"
   aggregate_report: true                      # ein Gesamtbericht über alle SQL-Dateien
-  aggregate_filename: "jira_report_{YYYY}_{MM}_{DD}.xlsx"
+  aggregate_filename: "scan_report.xlsx"      # fester Name (Platzhalter {YYYY} {MM} {DD} möglich)
   include_headers: true
   include_csv: false                          # optional zusätzlich CSV neben dem Bericht
   datetime_format: "%Y-%m-%d %H:%M:%S"

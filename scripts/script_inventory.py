@@ -125,7 +125,10 @@ class ScriptAnalyzer:
 
         try:
             stat = script_path.stat()
-            content = script_path.read_text(encoding="utf-8", errors="ignore")
+            try:
+                content = script_path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                content = script_path.read_text(encoding="latin-1")
         except OSError as exc:
             info["error"] = str(exc)
             return info
@@ -136,14 +139,20 @@ class ScriptAnalyzer:
             "%Y-%m-%d %H:%M:%S"
         )
         info["technologies"] = self._detect_technologies(content, script_path.suffix)
+
+        # Strip single-line (--) and multi-line (/* */) comments before parsing
+        # tables/KPIs/APIs to prevent false positives in SQL comments.
+        clean_content = re.sub(r"/\*[\s\S]*?\*/", "", content)
+        clean_content = re.sub(r"--.*", "", clean_content)
+
         info["db_access"] = sorted(
-            {match.upper() for match in TABLE_PATTERN.findall(content)}
+            {match.upper() for match in TABLE_PATTERN.findall(clean_content)}
         )
         info["api_calls"] = sorted(
-            {match.upper() for match in API_PATTERN.findall(content)}
+            {match.upper() for match in API_PATTERN.findall(clean_content)}
         )
         info["kpi_reports"] = sorted(
-            {match.lower() for match in KPI_PATTERN.findall(content)}
+            {match.lower() for match in KPI_PATTERN.findall(clean_content)}
         )
         info["complexity"] = self._complexity(info["lines"])
         return info

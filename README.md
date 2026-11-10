@@ -67,7 +67,7 @@ cd jirascanner
 # Konfiguration anpassen (Jira-URL, Token, Scan-Root)
 $EDITOR config.yaml
 
-# Phase 1: Verzeichnisstruktur einlesen (ohne Jira)
+# Phase 1: Verzeichnisstruktur einlesen (ohne Jira) Es wird bereits eine Excel-Datei als Output erstellt, nur ohne die Jira-Inhalte.
 python3 main.py --mode scan
 
 # Phase 2: Jira-Details nachladen (max. 100 Keys pro Request)

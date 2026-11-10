@@ -621,18 +621,26 @@ class ScriptScanner:
             info["modified_date"] = datetime.fromtimestamp(stat.st_mtime).strftime(
                 "%Y-%m-%d %H:%M:%S"
             )
-            content = script_path.read_text(encoding="utf-8", errors="ignore")
+            try:
+                content = script_path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                content = script_path.read_text(encoding="latin-1")
         except OSError as exc:
             info["error"] = str(exc)
             return info
 
         info["lines"] = len(content.splitlines())
         info["technologies"] = self._detect_technologies(content, script_path.suffix)
+
+        # Strip single-line (-- ...) and multi-line (/* ... */) comments before parsing tables/KPIs
+        clean_content = re.sub(r"/\*[\s\S]*?\*/", "", content)
+        clean_content = re.sub(r"--.*", "", clean_content)
+
         info["tables"] = sorted(
-            {match.upper() for match in self.TABLE_PATTERN.findall(content)}
+            {match.upper() for match in self.TABLE_PATTERN.findall(clean_content)}
         )
         info["kpi_reports"] = sorted(
-            {match.lower() for match in self.KPI_PATTERN.findall(content)}
+            {match.lower() for match in self.KPI_PATTERN.findall(clean_content)}
         )
         return info
 
