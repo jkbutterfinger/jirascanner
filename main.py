@@ -60,6 +60,9 @@ COLUMNS: List[tuple[str, int, bool]] = [
     ("Verwendete-Technologien", 45, True),
     ("Status", 14, False),
     ("Priorität", 12, False),
+    # Lokale Spalten aus der Verzeichnisstruktur (auch im Scan-Modus gefüllt)
+    ("Jahr", 8, False),
+    ("Abteilung", 20, False),
 ]
 
 PRIORITY_ALIASES = {
@@ -175,6 +178,23 @@ def derive_path_context(task_directory: Path) -> Dict[str, str]:
         "DEPARTMENT": parents[1].name if len(parents) >= 2 else "",
         "YEAR": parents[2].name if len(parents) >= 3 else "",
     }
+
+
+def local_path_columns(match: Dict[str, Any]) -> Dict[str, str]:
+    """Liefert Jahr und Abteilung aus dem Dateipfad.
+
+    Diese Werte stammen ausschließlich aus der Verzeichnisstruktur und
+    werden deshalb bereits im Scan-Modus (ohne Jira) gefüllt. Nur wenn der
+    Pfad der erwarteten Struktur entspricht (Jahr = vier Ziffern), werden
+    die Spalten befüllt.
+    """
+    path = str(match.get("path", "") or "")
+    if not path:
+        return {"Jahr": "", "Abteilung": ""}
+    context = derive_path_context(Path(path).parent)
+    if not re.fullmatch(r"\d{4}", context["YEAR"]):
+        return {"Jahr": "", "Abteilung": ""}
+    return {"Jahr": context["YEAR"], "Abteilung": context["DEPARTMENT"]}
 
 
 @dataclass
@@ -858,6 +878,8 @@ def build_rows_for_task(
                 "Verwendete-Technologien": "",
                 "Status": task.status or "Missing",
                 "Priorität": task.priority,
+                "Jahr": "",
+                "Abteilung": "",
             }
         ]
 
@@ -877,6 +899,7 @@ def build_rows_for_task(
                 ),
                 "Status": task.status or "Open",
                 "Priorität": task.priority,
+                **local_path_columns(match),
             }
         )
     return rows
@@ -913,6 +936,7 @@ def build_scan_rows(
                 ),
                 "Status": "Pending",
                 "Priorität": "",
+                **local_path_columns(match),
             }
         )
     return rows
@@ -955,6 +979,8 @@ def empty_report_row(prefix: str = "JRA-") -> Dict[str, Any]:
         "Verwendete-Technologien": "",
         "Status": "Open",
         "Priorität": "Medium",
+        "Jahr": "",
+        "Abteilung": "",
     }
 
 

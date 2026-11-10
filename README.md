@@ -124,8 +124,8 @@ python3 main.py --mode scan
 ```
 
 - Liest ausschließlich die Verzeichnisstruktur und die `.sql`-Dateien.
-- Erzeugt pro Task bereits `<Jira-Task>.xlsx` mit File-Datum, Pfad und
-  erkannten Technologien.
+- Erzeugt pro Task bereits `<Jira-Task>.xlsx` mit File-Datum, Pfad,
+  erkannten Technologien sowie Jahr und Abteilung aus der Verzeichnisstruktur.
 - Jira-Spalten bleiben leer, Status = `Pending`.
 - Schreibt die Inventur nach `storage.scan_index` (Standard:
   `inventory/scan_index.json`).
@@ -185,10 +185,12 @@ alle 10 Spalten nebeneinander und eine Zeile pro gefundener SQL-Datei:
 | 8 | Verwendete-Technologien | `SQL` plus erkannte Dialekt-Hinweise |
 | 9 | Status | Jira-Status |
 | 10 | Priorität | Jira-Priorität (normalisiert) |
+| 11 | Jahr | Jahr aus der Verzeichnisstruktur (lokal) |
+| 12 | Abteilung | Abteilung aus der Verzeichnisstruktur (lokal) |
 
 In Phase 1 (`--mode scan`) bleiben die Jira-Spalten 2–5, 9 und 10 leer;
-Status ist `Pending`. Phase 2 (`--mode enrich`) füllt sie mit den
-Jira-Details.
+Status ist `Pending`. Die lokalen Spalten 1, 6–8, 11 und 12 werden bereits
+im Scan-Modus gefüllt. Phase 2 (`--mode enrich`) ergänzt die Jira-Details.
 
 Beispiel für `/mount/2024/IT/ACME/JRA-1001/JRA-1001.xlsx`:
 

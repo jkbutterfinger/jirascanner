@@ -367,8 +367,8 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
        storage.scan_index (Standard: inventory/scan_index.json)
      Sie enthält pro Task: Verzeichnis, Pfadkontext und SQL-Dateien.
  10) Die Excel-Berichte aus Phase 1 enthalten bereits File-Datum,
-     File-Location und Technologien; die Jira-Spalten bleiben leer
-     (Status = "Pending").
+     File-Location, Technologien sowie Jahr und Abteilung (lokale
+     Spalten 11/12); die Jira-Spalten bleiben leer (Status = "Pending").
 
 6.4 Technologie-Erkennung
 
@@ -407,8 +407,9 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
   mehrere Zeilen im selben Excel-Bericht.
 
   In Phase 1 (--mode scan) wird der Bericht bereits mit File-Datum,
-  File-Location und Technologien geschrieben; die Jira-Spalten bleiben
-  leer (Status = "Pending"). Phase 2 (--mode enrich) schreibt denselben
+  File-Location, Technologien sowie Jahr und Abteilung (aus der
+  Verzeichnisstruktur) geschrieben; die Jira-Spalten bleiben leer
+  (Status = "Pending"). Phase 2 (--mode enrich) schreibt denselben
   Bericht mit den Jira-Details neu.
 
   Nur wenn keine Tasks/SQL-Dateien gefunden werden, wird ein leerer
@@ -437,15 +438,17 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
    8 Verwendete-Technologien        45 (Umbruch)
    9 Status                         14
   10 Priorität                      12
+  11 Jahr                            8 (lokal, aus Verzeichnisstruktur)
+  12 Abteilung                      20 (lokal, aus Verzeichnisstruktur)
 
 7.3 Beispiel (side-by-side)
 
   Datei: /mount/2024/IT/ACME/JRA-1001/JRA-1001.xlsx
 
-  Jira-Nummer | Jira-Auftraggeber | Entwickler  | Jahr/Monat/Tag-Abgeschlossen | Zusammenfassung-Anforderung | File-Datum | File-Location                                  | Verwendete-Technologien | Status      | Priorität
-  JRA-1001    | Max Mustermann    | Anna Meier  | 2024-02-01 10:00:00          | Monthly Sales Dashboard     | 2024-01-10 | /mount/2024/IT/ACME/JRA-1001/monthly_sales.sql | SQL                     | Done        | High
-  JRA-1001    | Max Mustermann    | Anna Meier  | 2024-02-01 10:00:00          | Monthly Sales Dashboard     | 2024-01-12 | /mount/2024/IT/ACME/JRA-1001/etl_refresh.sql   | SQL                     | Done        | High
-  JRA-1002    | Lisa Schmidt      | Tom Mueller | Pending                      | ETL Pipeline                | 2024-01-15 | /mount/2024/IT/ACME/JRA-1002/export.sql        | SQL                     | In Progress | Medium
+  Jira-Nummer | Jira-Auftraggeber | Entwickler  | Jahr/Monat/Tag-Abgeschlossen | Zusammenfassung-Anforderung | File-Datum | File-Location                                  | Verwendete-Technologien | Status      | Priorität | Jahr | Abteilung
+  JRA-1001    | Max Mustermann    | Anna Meier  | 2024-02-01 10:00:00          | Monthly Sales Dashboard     | 2024-01-10 | /mount/2024/IT/ACME/JRA-1001/monthly_sales.sql | SQL                     | Done        | High      | 2024 | IT
+  JRA-1001    | Max Mustermann    | Anna Meier  | 2024-02-01 10:00:00          | Monthly Sales Dashboard     | 2024-01-12 | /mount/2024/IT/ACME/JRA-1001/etl_refresh.sql   | SQL                     | Done        | High      | 2024 | IT
+  JRA-1002    | Lisa Schmidt      | Tom Mueller | Pending                      | ETL Pipeline                | 2024-01-15 | /mount/2024/IT/ACME/JRA-1002/export.sql        | SQL                     | In Progress | Medium    | 2024 | IT
 
 7.4 Formatierung
 

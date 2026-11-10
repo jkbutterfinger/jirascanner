@@ -198,6 +198,8 @@ def test_export_per_task_into_task_directory(tmp_path: Path) -> None:
     worksheet = load_workbook(path).active
     assert worksheet.cell(1, 1).value == "Jira-Nummer"
     assert worksheet.cell(1, 10).value == "Priorität"
+    assert worksheet.cell(1, 11).value == "Jahr"
+    assert worksheet.cell(1, 12).value == "Abteilung"
     assert worksheet.cell(2, 1).value == "JRA-1001"
     assert worksheet.cell(3, 1).value == "GESAMT"
 
@@ -285,7 +287,7 @@ def test_fetch_tasks_by_keys_uses_batches_of_max_100() -> None:
 
 def test_build_scan_and_enriched_rows(tmp_path: Path) -> None:
     match = {
-        "path": str(tmp_path / "report.sql"),
+        "path": str(tmp_path / "2024" / "IT" / "ACME" / "JRA-1001" / "report.sql"),
         "modified_date": "2024-01-10 12:00:00",
         "technologies": ["SQL"],
     }
@@ -295,10 +297,15 @@ def test_build_scan_and_enriched_rows(tmp_path: Path) -> None:
     assert scan_rows[0]["Jira-Auftraggeber"] == ""
     assert scan_rows[0]["File-Datum"] == "2024-01-10"
     assert scan_rows[0]["File-Location"].endswith("report.sql")
+    # Lokale Spalten werden bereits im Scan-Modus gefüllt.
+    assert scan_rows[0]["Jahr"] == "2024"
+    assert scan_rows[0]["Abteilung"] == "IT"
 
     missing = build_enriched_rows("JRA-1001", None, [match])
     assert missing[0]["Status"] == "Missing"
     assert missing[0]["File-Location"].endswith("report.sql")
+    assert missing[0]["Jahr"] == "2024"
+    assert missing[0]["Abteilung"] == "IT"
 
     task = JiraIssue(
         key="JRA-1001",
@@ -313,6 +320,8 @@ def test_build_scan_and_enriched_rows(tmp_path: Path) -> None:
     assert enriched[0]["Status"] == "Done"
     assert enriched[0]["Jira-Auftraggeber"] == "Max"
     assert enriched[0]["Jahr/Monat/Tag-Abgeschlossen"] == "2024-02-01 10:00:00"
+    assert enriched[0]["Jahr"] == "2024"
+    assert enriched[0]["Abteilung"] == "IT"
 
 
 def test_scan_index_roundtrip(tmp_path: Path) -> None:
@@ -376,6 +385,8 @@ def test_cli_scan_and_enrich_modes(tmp_path: Path) -> None:
     scan_sheet = load_workbook(report).active
     assert scan_sheet.cell(2, 9).value == "Pending"
     assert scan_sheet.cell(2, 2).value in (None, "")
+    assert scan_sheet.cell(2, 11).value == "2024"
+    assert scan_sheet.cell(2, 12).value == "IT"
 
     # Phase 2: Jira-Details anreichern (Batch-Parameter werden durchgereicht).
     task = JiraIssue(
@@ -414,6 +425,8 @@ def test_cli_scan_and_enrich_modes(tmp_path: Path) -> None:
     assert enriched_sheet.cell(2, 2).value == "Max"
     assert enriched_sheet.cell(2, 9).value == "Done"
     assert enriched_sheet.cell(2, 10).value == "High"
+    assert enriched_sheet.cell(2, 11).value == "2024"
+    assert enriched_sheet.cell(2, 12).value == "IT"
 
 
 def test_scan_phase_filters_foreign_prefix(tmp_path: Path) -> None:
