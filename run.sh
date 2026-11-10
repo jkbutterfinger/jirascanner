@@ -67,9 +67,16 @@ echo ""
 if [[ $EXIT_CODE -eq 0 ]]; then
     echo "✅ Bericht erfolgreich erzeugt."
     echo ""
-    echo "Ausgabedateien (Fallback):"
-    ls -lh output/*.xlsx output/*.csv 2>/dev/null || echo "  (keine Fallback-Dateien)"
-    echo "Task-Berichte liegen in den jeweiligen Task-Verzeichnissen."
+    echo "Ausgabedateien:"
+    shopt -s nullglob
+    reports=(output/*.xlsx output/*.csv)
+    if [[ ${#reports[@]} -gt 0 ]]; then
+        ls -lh "${reports[@]}"
+    else
+        echo "  (keine Dateien unter output/)"
+    fi
+    shopt -u nullglob
+    echo "Gesamtbericht liegt unter output/ (excel.output_path)."
     echo "Scan-Index: inventory/scan_index.json"
 else
     echo "❌ Berichtserzeugung fehlgeschlagen (Exit-Code $EXIT_CODE)."

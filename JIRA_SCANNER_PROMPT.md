@@ -19,7 +19,8 @@ VENV              : .venv (wird von setup.sh angelegt, von run.sh automatisch ge
 KONFIGURATION     : config.yaml (Defaults und Umgebungsvariablen: config.py)
 TESTS             : ./setup.sh --dev --test  bzw.  pytest && ruff check .
 SCAN-INDEX        : inventory/scan_index.json (storage.scan_index)
-EXCEL-BERICHT     : <base_path>/<Jahr>/<Abteilung>/<Auftraggeber>/<Jira-Task>/<Jira-Task>.xlsx
+EXCEL-BERICHT     : output/jira_report_<YYYY>_<MM>_<DD>.xlsx (Gesamtbericht)
+                    optional pro Task: <base_path>/.../<Jira-Task>/<Jira-Task>.xlsx
 CLI-MODI          : --mode scan | enrich | all (Default: all)
 BATCH-LIMIT       : max. 100 Jira-Keys pro Request (hart begrenzt)
 BATCH-PAUSE       : jira.batch_delay_seconds (Default 1.0 s), CLI --batch-delay
@@ -34,8 +35,10 @@ synchron zu halten.
 
 Der Scanner sucht ausschließlich SQL-Dateien in einer definierten
 Verzeichnisstruktur. Die Jira-Referenz wird aus dem Verzeichnisnamen
-abgeleitet - nicht aus dem Dateiinhalt. Für jeden Jira-Task (Auftrag)
-wird ein eigener Excel-Bericht direkt im Task-Verzeichnis abgelegt.
+abgeleitet - nicht aus dem Dateiinhalt. Standardmäßig wird ein einziger
+Gesamtbericht über alle gefundenen SQL-Dateien unter excel.output_path
+erzeugt. Optional (excel.aggregate_report=false) entsteht für jeden
+Jira-Task ein eigener Excel-Bericht direkt im Task-Verzeichnis.
 
 Der Ablauf ist in zwei Aufrufmodi geteilt:
 
@@ -58,9 +61,17 @@ Beispiel:
   /mount/2024/IT/ACME/JRA-1002/export.sql
 
 Der Task-Key ist der Name des Elternverzeichnisses der SQL-Datei.
-Der Excel-Bericht wird dort abgelegt:
+Der Gesamtbericht wird unter excel.output_path abgelegt:
+
+  output/jira_report_<YYYY>_<MM>_<DD>.xlsx
+
+Mit excel.aggregate_report=false wird pro Task ein Bericht im
+Task-Verzeichnis abgelegt:
 
   /mount/2024/IT/ACME/JRA-1001/JRA-1001.xlsx
+
+SQL-Dateien außerhalb eines Task-Verzeichnisses werden ebenfalls
+analysiert und erscheinen ohne Jira-Nummer im Gesamtbericht.
 
 Er liefert:
 - Task-Zuweisungen (Auftraggeber, Entwickler)
@@ -80,7 +91,7 @@ main.py
   - JiraClient          : Jira REST API v3, Pagination, Retry, ADF-Parsing,
                           Batch-Abfrage nach Keys (max. 100 pro Request)
   - ScriptScanner       : SQL-Scan + Index nach Task-Verzeichnis
-  - ExcelExporter       : ein XLSX-Bericht pro Task im Task-Verzeichnis
+  - ExcelExporter       : Gesamtbericht oder ein XLSX-Bericht pro Task
   - build_scan_index()  : Inventur der Verzeichnisstruktur (JSON)
   - run_scan_phase()    : Phase 1 ohne Jira
   - run_enrich_phase()  : Phase 2 mit Jira-Anreicherung
@@ -195,8 +206,10 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
     batch_delay_seconds: 1.0   # Pause zwischen zwei Blöcken
 
   excel:
-    output_path: "output"                        # nur Fallback
-    output_filename: "{JIRA}.xlsx"               # pro Task im Task-Ordner
+    output_path: "output"                        # Ablage des Gesamtberichts
+    aggregate_report: true                       # ein Bericht über alle Dateien
+    aggregate_filename: "jira_report_{YYYY}_{MM}_{DD}.xlsx"
+    output_filename: "{JIRA}.xlsx"               # pro Task (nur bei false)
     fallback_filename: "jira_report_{YYYY}_{MM}_{DD}.xlsx"
     include_csv: false
     datetime_format: "%Y-%m-%d %H:%M:%S"
@@ -231,7 +244,18 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
 
 4.4 Dateiname des Excel-Berichts
 
-  excel.output_filename unterstützt folgende Platzhalter:
+  Gesamtbericht (Standard):
+
+    excel.aggregate_report = true
+    excel.aggregate_filename = "jira_report_{YYYY}_{MM}_{DD}.xlsx"
+
+    Platzhalter: {YYYY}, {MM}, {DD}
+    Ablage: excel.output_path (Standard: output/)
+
+  Pro Task (optional):
+
+    excel.aggregate_report = false
+    excel.output_filename = "{JIRA}.xlsx"
 
     {JIRA}        Jira-Task-Key, z. B. JRA-1001
     {SQL}         Dateiname (ohne .sql) der ersten SQL-Datei
@@ -242,7 +266,8 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
     {MM}          aktueller Monat
     {DD}          aktueller Tag
 
-  Standard: "{JIRA}.xlsx" -> /mount/2024/IT/ACME/JRA-1001/JRA-1001.xlsx
+  Standard im Task-Modus: "{JIRA}.xlsx"
+  -> /mount/2024/IT/ACME/JRA-1001/JRA-1001.xlsx
 
 ================================================================================
 5. NUTZUNG
@@ -268,7 +293,8 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
     python3 main.py --mode scan
     ./run.sh --mode scan
 
-    - erzeugt pro Task bereits <Jira-Task>.xlsx
+    - erzeugt den Gesamtbericht unter excel.output_path
+    - analysiert alle SQL-Dateien, auch außerhalb von Task-Verzeichnissen
     - Jira-Spalten bleiben leer, Status = "Pending"
     - schreibt inventory/scan_index.json (storage.scan_index)
 
@@ -337,8 +363,9 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
 
   filters.prefix (Standard "JRA-") wird clientseitig geprüft. In Phase 1
   werden Task-Verzeichnisse außerhalb dieses Prefix ignoriert; --prefix
-  überschreibt den konfigurierten Wert. Beim projektweiten Suchpfad
-  (z. B. API /api/tasks?refresh=true) wird ebenfalls gefiltert.
+  überschreibt den konfigurierten Wert. Dateien ohne Task-Key bleiben im
+  Gesamtbericht. Beim projektweiten Suchpfad (z. B. API
+  /api/tasks?refresh=true) wird ebenfalls gefiltert.
 
   Die CLI-Anreicherung fragt gezielt die aus der Verzeichnisstruktur
   abgeleiteten Keys ab:
@@ -360,12 +387,13 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
        - File-Location: Pfad der jeweiligen SQL-Datei
        - File-Datum: Änderungsdatum (YYYY-MM-DD)
        - Verwendete-Technologien: SQL plus erkannte Dialekt-Hinweise
-  7) Liegt eine SQL-Datei nicht in einem Task-Verzeichnis, wird sie mit
-     einer Warnung ignoriert.
+  7) Liegt eine SQL-Datei nicht in einem Task-Verzeichnis, wird sie ohne
+     Task-Zuordnung (leere Jira-Nummer) in den Gesamtbericht aufgenommen.
   8) Kein Treffer -> File-Location = "Not found".
   9) Phase 1 (--mode scan) schreibt die Inventur als JSON:
        storage.scan_index (Standard: inventory/scan_index.json)
-     Sie enthält pro Task: Verzeichnis, Pfadkontext und SQL-Dateien.
+     Sie enthält pro Task: Verzeichnis, Pfadkontext und SQL-Dateien sowie
+     eine flache Liste "files" mit allen analysierten SQL-Dateien.
  10) Die Excel-Berichte aus Phase 1 enthalten bereits File-Datum,
      File-Location, Technologien sowie Jahr und Abteilung (lokale
      Spalten 11/12); die Jira-Spalten bleiben leer (Status = "Pending").
@@ -390,8 +418,8 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
   6) Fehlgeschlagene Blöcke werden geloggt und übersprungen; die
      übrigen Blöcke laufen weiter.
   7) Nicht gefundene Keys bleiben mit Status "Missing" erhalten.
-  8) Anschließend werden die Excel-Berichte im Task-Verzeichnis neu
-     geschrieben.
+  8) Anschließend wird der Gesamtbericht (oder im Task-Modus die
+     Task-Berichte) neu geschrieben.
 
 ================================================================================
 7. EXCEL-AUSGABE
@@ -399,7 +427,16 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
 
 7.1 Ablage
 
-  Pro Jira-Task genau eine Excel-Datei im Task-Verzeichnis:
+  Standardmäßig entsteht ein Gesamtbericht über alle SQL-Dateien:
+
+    <excel.output_path>/jira_report_<YYYY>_<MM>_<DD>.xlsx
+    (Standard: output/jira_report_<YYYY>_<MM>_<DD>.xlsx)
+
+  Er enthält eine Zeile pro SQL-Datei. Dateien in Task-Verzeichnissen
+  erhalten eine Jira-Nummer; Dateien außerhalb bleiben ohne Task-Kontext.
+
+  Mit excel.aggregate_report=false entsteht pro Jira-Task genau eine
+  Excel-Datei im Task-Verzeichnis:
 
     /mount/<Jahr>/<Abteilung>/<Auftraggeber>/<Jira-Task>/<Jira-Task>.xlsx
 
@@ -412,7 +449,7 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
   (Status = "Pending"). Phase 2 (--mode enrich) schreibt denselben
   Bericht mit den Jira-Details neu.
 
-  Nur wenn keine Tasks/SQL-Dateien gefunden werden, wird ein leerer
+  Nur wenn keine SQL-Dateien gefunden werden, wird ein leerer
   Fallback-Bericht unter excel.output_path geschrieben:
     <output_path>/jira_report_YYYY_MM_DD.xlsx
 
@@ -443,12 +480,13 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
 
 7.3 Beispiel (side-by-side)
 
-  Datei: /mount/2024/IT/ACME/JRA-1001/JRA-1001.xlsx
+  Datei: output/jira_report_2026_11_10.xlsx
 
   Jira-Nummer | Jira-Auftraggeber | Entwickler  | Jahr/Monat/Tag-Abgeschlossen | Zusammenfassung-Anforderung | File-Datum | File-Location                                  | Verwendete-Technologien | Status      | Priorität | Jahr | Abteilung
   JRA-1001    | Max Mustermann    | Anna Meier  | 2024-02-01 10:00:00          | Monthly Sales Dashboard     | 2024-01-10 | /mount/2024/IT/ACME/JRA-1001/monthly_sales.sql | SQL                     | Done        | High      | 2024 | IT
   JRA-1001    | Max Mustermann    | Anna Meier  | 2024-02-01 10:00:00          | Monthly Sales Dashboard     | 2024-01-12 | /mount/2024/IT/ACME/JRA-1001/etl_refresh.sql   | SQL                     | Done        | High      | 2024 | IT
   JRA-1002    | Lisa Schmidt      | Tom Mueller | Pending                      | ETL Pipeline                | 2024-01-15 | /mount/2024/IT/ACME/JRA-1002/export.sql        | SQL                     | In Progress | Medium    | 2024 | IT
+              |                   |             |                              |                             | 2024-01-16 | /mount/oracle_sql/list_tables.sql              | SQL                     | Pending     |           |      |
 
 7.4 Formatierung
 
@@ -463,9 +501,10 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
 
 7.5 CSV (optional)
 
-  Wenn excel.include_csv=true, wird zusätzlich pro Task eine CSV neben
-  dem Excel-Bericht geschrieben:
-    <Jira-Task>.csv
+  Wenn excel.include_csv=true, wird zusätzlich eine CSV neben dem
+  Excel-Bericht geschrieben:
+    Gesamtbericht: <aggregate_filename>.csv
+    Task-Modus:    <Jira-Task>.csv
   Format: UTF-8 mit BOM, Semikolon als Trennzeichen.
 
 ================================================================================
@@ -523,7 +562,8 @@ und Detailmeldung zurückgegeben.
   Scan-Index fehlt bei --mode enrich -> Verzeichnisstruktur wird automatisch
                                         zuerst eingelesen
   Scan-Root fehlt                    -> Warnung, keine Berichte
-  SQL außerhalb Task-Verzeichnis     -> Warnung, Datei wird ignoriert
+  SQL außerhalb Task-Verzeichnis     -> wird ohne Task-Zuordnung in den
+                                        Gesamtbericht aufgenommen
   Task ohne SQL-Datei                -> Warnung, kein Bericht für den Task
   Task-Key nicht in Jira gefunden    -> Scan-Daten bleiben, Status "Missing"
   Einzelne SQL-Datei unlesbar        -> Warnung, restliche Dateien laufen weiter
@@ -604,7 +644,8 @@ und Detailmeldung zurückgegeben.
   - Scan-Index (JSON-Roundtrip)
   - Scan- und Enrich-Phase inkl. CLI-Modi
   - Batch-Abfrage: maximal 100 Keys pro Request und Pause dazwischen
-  - Excel-Export pro Task inkl. Header und Summenzeile
+  - Excel-Gesamtbericht inkl. Dateien außerhalb von Task-Verzeichnissen
+  - optionaler Excel-Export pro Task inkl. Header und Summenzeile
   - Dateinamen-Platzhalter
   - ScriptAnalyzer (nur SQL)
   - API-Endpunkte (Health, Suggestions, Gaps, Dashboard)
@@ -614,7 +655,8 @@ und Detailmeldung zurückgegeben.
 ================================================================================
 
   - Es werden ausschließlich .sql-Dateien berücksichtigt.
-  - Die Task-Zuordnung hängt strikt an der Verzeichnisstruktur.
+  - Die Task-Zuordnung hängt strikt an der Verzeichnisstruktur; Dateien
+    ohne Task-Verzeichnis erscheinen ohne Jira-Nummer im Gesamtbericht.
   - Confluence-Integration ist nur als Config-Block vorhanden.
   - Gap-Analyse ist eine Referenzprüfung, kein semantisches Matching.
   - Kein Rückschreiben nach Jira.
@@ -661,14 +703,15 @@ und Detailmeldung zurückgegeben.
 14.3 Versionshistorie
 
   1.3.0   Zweiphasiger Ablauf:
-          - --mode scan   : Verzeichnisstruktur einlesen, Berichte mit
-                            Status "Pending" und Scan-Index erzeugen
+          - --mode scan   : Verzeichnisstruktur einlesen, Gesamtbericht
+                            mit Status "Pending" und Scan-Index erzeugen
           - --mode enrich : Jira-Details in Blöcken von max. 100 Keys
                             nachladen, konfigurierbare Pause
           - --mode all    : beide Phasen nacheinander (Default)
           - --batch-size / --batch-delay sowie jira.batch_size /
             jira.batch_delay_seconds
           - Prefix-Filter für Task-Verzeichnisse (Default "JRA-")
+          - Gesamtbericht über alle SQL-Dateien (excel.aggregate_report)
           - setup.sh für reproduzierbares Python-/venv-Setup
           - run.sh nutzt .venv automatisch
 

@@ -540,6 +540,7 @@ class ScriptScanner:
         self.include_subdirectories = bool(scripts.get("include_subdirectories", True))
         self.exclude = [str(item) for item in (scripts.get("exclude") or [])]
         self._scripts: List[Path] = []
+        self._files: List[Dict[str, Any]] = []
         self._index: Optional[Dict[str, List[Dict[str, Any]]]] = None
 
     def find_scripts(self) -> List[Path]:
@@ -608,8 +609,9 @@ class ScriptScanner:
             info["task_key"] = task_key
             info["jira_refs"] = [task_key]
         else:
-            LOGGER.warning(
-                "SQL-Datei ohne Jira-Task-Verzeichnis wird ignoriert: %s",
+            LOGGER.debug(
+                "SQL-Datei ohne Jira-Task-Verzeichnis wird ohne Task-Zuordnung "
+                "analysiert: %s",
                 script_path,
             )
 
@@ -635,21 +637,35 @@ class ScriptScanner:
         return info
 
     def build_index(self) -> Dict[str, List[Dict[str, Any]]]:
-        """Liest alle SQL-Dateien einmal und indexiert sie nach Task-Key."""
+        """Liest alle SQL-Dateien einmal und indexiert sie nach Task-Key.
+
+        Alle gefundenen Dateien werden in ``self._files`` gesammelt – auch
+        Dateien außerhalb eines Jira-Task-Verzeichnisses. Der Task-Index
+        enthält weiterhin nur Dateien mit erkennbarem Jira-Key.
+        """
         index: Dict[str, List[Dict[str, Any]]] = {}
+        files: List[Dict[str, Any]] = []
         for script in self.find_scripts():
             info = self.extract_script_info(script)
             if info.get("error"):
                 LOGGER.warning("SQL-Datei konnte nicht gelesen werden: %s", info["error"])
+            files.append(info)
             for reference in info.get("jira_refs", []):
                 index.setdefault(reference.upper(), []).append(info)
+        self._files = files
         self._index = index
         LOGGER.info(
-            "%s SQL-Datei(en) indexiert (%s Task-Verzeichnis(se))",
-            len(self._scripts),
+            "%s SQL-Datei(en) analysiert (%s Task-Verzeichnis(se))",
+            len(files),
             len(index),
         )
         return index
+
+    def get_all_files(self) -> List[Dict[str, Any]]:
+        """Liefert alle analysierten SQL-Dateien (auch ohne Jira-Task-Key)."""
+        if self._index is None:
+            self.build_index()
+        return list(self._files)
 
     def get_task_info(self, task: JiraIssue) -> List[Dict[str, Any]]:
         """Liefert alle SQL-Dateien, die im Verzeichnis des Tasks liegen."""
@@ -682,6 +698,7 @@ def build_scan_index(
 ) -> Dict[str, Any]:
     """Erzeugt eine serialisierbare Beschreibung der Verzeichnisstruktur."""
     task_index = index if index is not None else scanner.build_index()
+    files = scanner.get_all_files()
     tasks: Dict[str, Any] = {}
     for task_key in sorted(task_index):
         matches = task_index[task_key]
@@ -698,7 +715,8 @@ def build_scan_index(
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "base_path": str(scanner.base_path),
         "task_count": len(tasks),
-        "file_count": sum(len(entry["files"]) for entry in tasks.values()),
+        "file_count": len(files),
+        "files": files,
         "tasks": tasks,
     }
 
@@ -732,7 +750,12 @@ def load_scan_index(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 def filter_scan_data_by_prefix(
     scan_data: Dict[str, Any], prefix: Optional[str]
 ) -> Dict[str, Any]:
-    """Filtert die Inventur auf Task-Keys mit dem konfigurierten Prefix."""
+    """Filtert die Inventur auf Task-Keys mit dem konfigurierten Prefix.
+
+    Dateien ohne Jira-Task-Key (z. B. allgemeine SQL-Sammlungen) bleiben
+    erhalten, damit wirklich alle Dateien im Bericht auftauchen. Dateien in
+    Verzeichnissen fremder Projekte werden entfernt.
+    """
     if not prefix:
         return scan_data
 
@@ -752,10 +775,22 @@ def filter_scan_data_by_prefix(
             ", ".join(ignored),
         )
 
+    all_files = scan_data.get("files")
+    if isinstance(all_files, list):
+        files = [
+            entry
+            for entry in all_files
+            if not entry.get("task_key")
+            or str(entry["task_key"]).upper().startswith(prefix_upper)
+        ]
+    else:
+        files = [match for entry in kept.values() for match in entry.get("files", [])]
+
     filtered = dict(scan_data)
     filtered["tasks"] = kept
+    filtered["files"] = files
     filtered["task_count"] = len(kept)
-    filtered["file_count"] = sum(len(entry["files"]) for entry in kept.values())
+    filtered["file_count"] = len(files)
     return filtered
 
 
@@ -777,6 +812,13 @@ class ExcelExporter:
         self.sheet_name = str(excel_cfg.get("sheet_name", "Jira-Task-Report"))
         self.datetime_format = str(
             excel_cfg.get("datetime_format", "%Y-%m-%d %H:%M:%S")
+        )
+        self.aggregate_report = bool(excel_cfg.get("aggregate_report", False))
+        self.aggregate_filename = str(
+            excel_cfg.get(
+                "aggregate_filename",
+                "jira_report_{YYYY}_{MM}_{DD}.xlsx",
+            )
         )
 
     def _render_pattern(self, pattern: str, values: Dict[str, Any]) -> str:
@@ -826,6 +868,14 @@ class ExcelExporter:
         output_path = self.output_dir / filename
         self._write_workbook(data, output_path)
         LOGGER.info("Excel-Bericht gespeichert: %s", output_path)
+        return str(output_path)
+
+    def export_aggregate(self, data: List[Dict[str, Any]]) -> str:
+        """Schreibt einen einzigen Gesamtbericht nach ``excel.output_path``."""
+        filename = self._render_pattern(self.aggregate_filename, {})
+        output_path = self.output_dir / filename
+        self._write_workbook(data, output_path)
+        LOGGER.info("Gesamtbericht gespeichert: %s", output_path)
         return str(output_path)
 
     def _write_workbook(self, data: List[Dict[str, Any]], output_path: Path) -> None:
@@ -1020,6 +1070,47 @@ def build_enriched_rows(
     return build_rows_for_task(task, matches)
 
 
+def scan_files_from_data(scan_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Liefert alle Dateien einer Scan-Inventur (inkl. Dateien ohne Task)."""
+    files = scan_data.get("files")
+    if isinstance(files, list):
+        return files
+    return [
+        match
+        for entry in scan_data.get("tasks", {}).values()
+        for match in entry.get("files", [])
+    ]
+
+
+def build_aggregate_scan_rows(
+    files: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Baut einen Gesamtbericht ausschließlich aus Scan-Daten."""
+    rows: List[Dict[str, Any]] = []
+    for match in files:
+        task_key = str(match.get("task_key", "") or "")
+        rows.extend(build_scan_rows(task_key, [match]))
+    return rows
+
+
+def build_aggregate_enriched_rows(
+    scan_data: Dict[str, Any],
+    jira_tasks: Dict[str, JiraIssue],
+) -> List[Dict[str, Any]]:
+    """Baut einen Gesamtbericht mit optionalen Jira-Details pro Datei."""
+    rows: List[Dict[str, Any]] = []
+    for match in scan_files_from_data(scan_data):
+        task_key = str(match.get("task_key", "") or "").upper()
+        task = jira_tasks.get(task_key) if task_key else None
+        if task is not None:
+            rows.extend(build_rows_for_task(task, [match]))
+        elif task_key:
+            rows.extend(build_enriched_rows(task_key, None, [match]))
+        else:
+            rows.extend(build_scan_rows("", [match]))
+    return rows
+
+
 def build_report(
     tasks: List[JiraIssue], scanner: ScriptScanner
 ) -> List[Dict[str, Any]]:
@@ -1064,22 +1155,31 @@ def run_scan_phase(
 
     written: List[str] = []
     rows_all: List[Dict[str, Any]] = []
+    files = scan_files_from_data(scan_data)
 
-    if not scan_data["tasks"]:
+    if not files:
         fallback_prefix = prefix or str(
             config.get("filters", {}).get("prefix", "JRA-")
         )
         LOGGER.warning(
-            "Keine SQL-Dateien in Task-Verzeichnissen gefunden – "
-            "es wird ein leerer Fallback-Bericht erzeugt."
+            "Keine SQL-Dateien gefunden – es wird ein leerer Fallback-Bericht erzeugt."
         )
         rows_all = [empty_report_row(fallback_prefix)]
         if not dry_run:
-            written.append(exporter.export(rows_all))
+            if exporter.aggregate_report:
+                written.append(exporter.export_aggregate(rows_all))
+            else:
+                written.append(exporter.export(rows_all))
         return scan_data, written, rows_all
 
     if not dry_run:
         save_scan_index(config, scan_data)
+
+    if exporter.aggregate_report:
+        rows_all = build_aggregate_scan_rows(files)
+        if not dry_run:
+            written.append(exporter.export_aggregate(rows_all))
+        return scan_data, written, rows_all
 
     for task_key, entry in scan_data["tasks"].items():
         rows = build_scan_rows(task_key, entry["files"])
@@ -1132,10 +1232,24 @@ def run_enrich_phase(
     rows_all: List[Dict[str, Any]] = []
     missing: List[str] = []
 
+    for task_key in tasks:
+        if task_key.upper() not in jira_tasks:
+            missing.append(task_key)
+
+    if exporter.aggregate_report:
+        rows_all = build_aggregate_enriched_rows(scan_data, jira_tasks)
+        if not dry_run:
+            written.append(exporter.export_aggregate(rows_all))
+        if missing:
+            LOGGER.warning(
+                "Für %s Task(s) wurden keine Jira-Details gefunden: %s",
+                len(missing),
+                ", ".join(missing),
+            )
+        return written, rows_all
+
     for task_key, entry in tasks.items():
         task = jira_tasks.get(task_key.upper())
-        if task is None:
-            missing.append(task_key)
         rows = build_enriched_rows(task_key, task, entry["files"])
         rows_all.extend(rows)
         if dry_run:
@@ -1231,7 +1345,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             written.extend(scan_written)
             all_rows.extend(scan_rows)
             LOGGER.info(
-                "%s Task-Verzeichnis(se) mit %s SQL-Datei(en) gefunden",
+                "%s Task-Verzeichnis(se), %s SQL-Datei(en) im Scan",
                 scan_data.get("task_count", 0),
                 scan_data.get("file_count", 0),
             )

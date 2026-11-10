@@ -78,6 +78,8 @@ DEFAULTS: Dict[str, Any] = {
         "output_path": str(ROOT / "output"),
         "output_filename": "{JIRA}.xlsx",
         "fallback_filename": "jira_report_{YYYY}_{MM}_{DD}.xlsx",
+        "aggregate_report": True,
+        "aggregate_filename": "jira_report_{YYYY}_{MM}_{DD}.xlsx",
         "include_headers": True,
         "include_csv": False,
         "datetime_format": "%Y-%m-%d %H:%M:%S",

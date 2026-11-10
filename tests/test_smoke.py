@@ -6,6 +6,7 @@ Ausführen:
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from unittest.mock import patch
@@ -337,6 +338,7 @@ def test_scan_index_roundtrip(tmp_path: Path) -> None:
     mount = tmp_path / "mount"
     task_dir = mount / "2024" / "IT" / "ACME" / "JRA-1001"
     _write_file(task_dir, "report.sql", "SELECT 1;\n")
+    _write_file(mount / "oracle_sql", "list_tables.sql", "SELECT 2;\n")
 
     config = {
         **BASE_CONFIG,
@@ -351,7 +353,8 @@ def test_scan_index_roundtrip(tmp_path: Path) -> None:
     assert path.exists()
     assert loaded is not None
     assert loaded["task_count"] == 1
-    assert loaded["file_count"] == 1
+    assert loaded["file_count"] == 2
+    assert len(loaded["files"]) == 2
     assert loaded["tasks"]["JRA-1001"]["files"][0]["path"].endswith("report.sql")
 
 
@@ -388,8 +391,11 @@ def test_cli_scan_and_enrich_modes(tmp_path: Path) -> None:
 
     # Phase 1: nur Verzeichnisstruktur, kein Jira-Zugriff.
     assert main(["--mode", "scan", "--config", str(config_path)]) == 0
-    report = task_dir / "JRA-1001.xlsx"
+    reports = list((tmp_path / "output").glob("jira_report_*.xlsx"))
+    assert len(reports) == 1
+    report = reports[0]
     assert report.exists()
+    assert not (task_dir / "JRA-1001.xlsx").exists()
     assert (tmp_path / "inventory" / "scan_index.json").exists()
     scan_sheet = load_workbook(report).active
     assert scan_sheet.cell(2, 9).value == "Pending"
@@ -459,7 +465,15 @@ def test_scan_phase_filters_foreign_prefix(tmp_path: Path) -> None:
         )
         == 0
     )
-    assert (jra_dir / "JRA-1001.xlsx").exists()
+    reports = list((tmp_path / "output").glob("jira_report_*.xlsx"))
+    assert len(reports) == 1
+    worksheet = load_workbook(reports[0]).active
+    locations = [
+        worksheet.cell(row, 7).value for row in range(2, worksheet.max_row)
+    ]
+    assert any(str(location).endswith("report.sql") for location in locations)
+    assert not any("foreign.sql" in str(location) for location in locations)
+    assert not (jra_dir / "JRA-1001.xlsx").exists()
     assert not (ops_dir / "OPS-1.xlsx").exists()
 
 
@@ -475,12 +489,58 @@ def test_enrich_without_jira_keeps_scan_report(tmp_path: Path) -> None:
     config_path.write_text(yaml.safe_dump(data), encoding="utf-8")
 
     assert main(["--mode", "scan", "--config", str(config_path)]) == 0
-    report = task_dir / "JRA-1001.xlsx"
+    reports = list((tmp_path / "output").glob("jira_report_*.xlsx"))
+    assert len(reports) == 1
+    report = reports[0]
     assert load_workbook(report).active.cell(2, 9).value == "Pending"
 
     # Ohne Jira-Konfiguration darf enrich den Scan-Bericht nicht verändern.
     assert main(["--mode", "enrich", "--config", str(config_path)]) == 0
     assert load_workbook(report).active.cell(2, 9).value == "Pending"
+
+
+def test_aggregate_scan_includes_files_outside_task_dirs(tmp_path: Path) -> None:
+    mount = tmp_path / "mount"
+    task_dir = mount / "2024" / "IT" / "ACME" / "JRA-1001"
+    _write_file(task_dir, "report.sql", "SELECT 1;\n")
+    oracle_dir = mount / "oracle_sql"
+    _write_file(oracle_dir, "list_tables.sql", "SELECT * FROM user_tables;\n")
+    _write_file(oracle_dir, "list_views.sql", "SELECT * FROM user_views;\n")
+    config_path = _write_cli_config(tmp_path, mount)
+
+    assert main(["--mode", "scan", "--config", str(config_path)]) == 0
+
+    reports = list((tmp_path / "output").glob("jira_report_*.xlsx"))
+    assert len(reports) == 1
+    worksheet = load_workbook(reports[0]).active
+    rows = [
+        {
+            "task": worksheet.cell(row, 1).value,
+            "location": worksheet.cell(row, 7).value,
+            "year": worksheet.cell(row, 11).value,
+            "department": worksheet.cell(row, 12).value,
+        }
+        for row in range(2, worksheet.max_row)
+    ]
+    assert len(rows) == 3
+    assert {row["location"] for row in rows} == {
+        str(task_dir / "report.sql"),
+        str(oracle_dir / "list_tables.sql"),
+        str(oracle_dir / "list_views.sql"),
+    }
+    task_row = next(row for row in rows if row["location"].endswith("report.sql"))
+    assert task_row["task"] == "JRA-1001"
+    assert task_row["year"] == "2024"
+    assert task_row["department"] == "IT"
+    orphan_rows = [row for row in rows if "oracle_sql" in row["location"]]
+    assert all(row["task"] in (None, "") for row in orphan_rows)
+
+    index = json.loads(
+        (tmp_path / "inventory" / "scan_index.json").read_text(encoding="utf-8")
+    )
+    assert index["task_count"] == 1
+    assert index["file_count"] == 3
+    assert len(index["files"]) == 3
 
 
 def test_api_endpoints(tmp_path: Path) -> None:

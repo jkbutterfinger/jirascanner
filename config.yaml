@@ -73,11 +73,13 @@ jira:
 # Platzhalter für output_filename:
 #   {JIRA}, {SQL}, {YEAR}, {DEPARTMENT}, {CUSTOMER}, {YYYY}, {MM}, {DD}
 excel:
-  output_path: "output"                       # nur Fallback für leere Berichte
-  output_filename: "{JIRA}.xlsx"              # pro Task im Task-Verzeichnis
+  output_path: "output"                       # Ablage des Gesamtberichts
+  output_filename: "{JIRA}.xlsx"              # pro Task (nur bei aggregate_report: false)
   fallback_filename: "jira_report_{YYYY}_{MM}_{DD}.xlsx"
+  aggregate_report: true                      # ein Gesamtbericht über alle SQL-Dateien
+  aggregate_filename: "jira_report_{YYYY}_{MM}_{DD}.xlsx"
   include_headers: true
-  include_csv: false                          # optional zusätzlich CSV pro Task
+  include_csv: false                          # optional zusätzlich CSV neben dem Bericht
   datetime_format: "%Y-%m-%d %H:%M:%S"
   sheet_name: "Jira-Task-Report"
 

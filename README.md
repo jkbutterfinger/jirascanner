@@ -2,8 +2,9 @@
 
 Der Scanner durchsucht ein Verzeichnis ausschließlich nach **SQL-Dateien**.
 Die Jira-Referenz wird aus der Verzeichnisstruktur abgeleitet – nicht aus dem
-Dateiinhalt. Für jeden Jira-Task (Auftrag) wird ein eigener Excel-Bericht
-direkt im Task-Verzeichnis abgelegt.
+Dateiinhalt. Standardmäßig entsteht **ein Gesamtbericht** über alle gefundenen
+SQL-Dateien unter `excel.output_path` (Standard: `output/`). Alternativ kann
+weiterhin pro Jira-Task ein eigener Bericht im Task-Verzeichnis erzeugt werden.
 
 **Standard-Prefix:** `JRA-` · **Version:** 1.3.0 · **Python:** ≥ 3.9
 
@@ -26,7 +27,15 @@ Beispiel:
 ```
 
 Der Task-Key ist der Name des Elternverzeichnisses der SQL-Datei
-(`JRA-1001`, `JRA-1002`, ...). Der Bericht wird dort abgelegt:
+(`JRA-1001`, `JRA-1002`, ...). Im Standardmodus landen alle Dateien in einem
+Gesamtbericht:
+
+```text
+output/jira_report_<YYYY>_<MM>_<DD>.xlsx
+```
+
+Mit `excel.aggregate_report: false` wird stattdessen pro Task ein Bericht im
+Task-Verzeichnis abgelegt:
 
 ```text
 /mount/2024/IT/ACME/JRA-1001/JRA-1001.xlsx
@@ -34,9 +43,10 @@ Der Task-Key ist der Name des Elternverzeichnisses der SQL-Datei
 
 - **Nur `.sql`** wird gescannt; andere Dateien werden ignoriert.
 - Ein Task-Verzeichnis kann mehrere SQL-Dateien enthalten. Sie erscheinen als
-  mehrere Zeilen im selben Excel-Bericht.
-- Liegt eine SQL-Datei nicht in einem `<Jira-Task>`-Verzeichnis, wird sie mit
-  einer Warnung ignoriert.
+  mehrere Zeilen im Bericht.
+- SQL-Dateien außerhalb eines `<Jira-Task>`-Verzeichnisses werden ebenfalls
+  analysiert. Sie erhalten keine Jira-Nummer; `Jahr` und `Abteilung` bleiben
+  leer, sofern die Verzeichnisstruktur nicht passt.
 
 Der Scan-Root wird über `scripts.base_path` gesetzt (z. B. `/mount`).
 
@@ -123,14 +133,14 @@ Der Scanner ist in zwei Phasen aufgeteilt, die einzeln oder zusammen laufen.
 python3 main.py --mode scan
 ```
 
-- Liest ausschließlich die Verzeichnisstruktur und die `.sql`-Dateien.
-- Erzeugt pro Task bereits `<Jira-Task>.xlsx` mit File-Datum, Pfad,
-  erkannten Technologien sowie Jahr und Abteilung aus der Verzeichnisstruktur.
+- Liest die Verzeichnisstruktur und alle `.sql`-Dateien.
+- Erzeugt standardmäßig den Gesamtbericht mit File-Datum, Pfad, erkannten
+  Technologien sowie Jahr und Abteilung aus der Verzeichnisstruktur.
 - Jira-Spalten bleiben leer, Status = `Pending`.
 - Schreibt die Inventur nach `storage.scan_index` (Standard:
   `inventory/scan_index.json`).
-- Berücksichtigt nur Task-Keys mit `filters.prefix` (Standard `JRA-`);
-  `--prefix` überschreibt den Wert.
+- Filtert Task-Keys gegen `filters.prefix` (Standard `JRA-`); `--prefix`
+  überschreibt den Wert. Dateien ohne Task-Key bleiben im Gesamtbericht.
 - Benötigt keine Jira-Konfiguration und keinen Jira-Zugriff.
 
 ### 2. Jira-Details anreichern
@@ -170,12 +180,17 @@ python3 main.py --mode all      # Default
 
 ## Excel-Bericht
 
-Pro Jira-Task entsteht **eine** Excel-Datei im Task-Verzeichnis. Sie enthält
-alle 10 Spalten nebeneinander und eine Zeile pro gefundener SQL-Datei:
+Im Standardmodus (`excel.aggregate_report: true`) entsteht **ein Gesamtbericht**
+unter `excel.output_path` (Standard: `output/`). Er enthält eine Zeile pro
+gefundener SQL-Datei – auch für Dateien außerhalb eines Jira-Task-Verzeichnisses.
+Mit `excel.aggregate_report: false` entsteht stattdessen pro Jira-Task eine
+eigene Excel-Datei im Task-Verzeichnis.
+
+Die Tabelle enthält alle 12 Spalten nebeneinander:
 
 | # | Spalte | Inhalt |
 |---|--------|--------|
-| 1 | Jira-Nummer | Task-Key, z. B. `JRA-1001` |
+| 1 | Jira-Nummer | Task-Key, z. B. `JRA-1001` (leer ohne Task-Zuordnung) |
 | 2 | Jira-Auftraggeber | Reporter (`displayName`) |
 | 3 | Entwickler | Assignee (`displayName`) |
 | 4 | Jahr/Monat/Tag-Abgeschlossen | `resolutiondate` oder `Pending` |
@@ -192,12 +207,13 @@ In Phase 1 (`--mode scan`) bleiben die Jira-Spalten 2–5, 9 und 10 leer;
 Status ist `Pending`. Die lokalen Spalten 1, 6–8, 11 und 12 werden bereits
 im Scan-Modus gefüllt. Phase 2 (`--mode enrich`) ergänzt die Jira-Details.
 
-Beispiel für `/mount/2024/IT/ACME/JRA-1001/JRA-1001.xlsx`:
+Beispiel für `output/jira_report_2026_11_10.xlsx`:
 
 ```text
-Jira-Nummer | Jira-Auftraggeber | Entwickler | Jahr/Monat/Tag-Abgeschlossen | Zusammenfassung-Anforderung | File-Datum | File-Location                                  | Verwendete-Technologien | Status | Priorität | Jahr | Abteilung
-JRA-1001    | Max Mustermann    | Anna Meier | 2024-02-01 10:00:00          | Monthly Sales Dashboard     | 2024-01-10 | /mount/2024/IT/ACME/JRA-1001/monthly_sales.sql | SQL                     | Done   | High      | 2024 | IT
-JRA-1001    | Max Mustermann    | Anna Meier | 2024-02-01 10:00:00          | Monthly Sales Dashboard     | 2024-01-12 | /mount/2024/IT/ACME/JRA-1001/etl_refresh.sql   | SQL                     | Done   | High      | 2024 | IT
+Jira-Nummer | Jira-Auftraggeber | Entwickler | Jahr/Monat/Tag-Abgeschlossen | Zusammenfassung-Anforderung | File-Datum | File-Location                                  | Verwendete-Technologien | Status  | Priorität | Jahr | Abteilung
+JRA-1001    | Max Mustermann    | Anna Meier | 2024-02-01 10:00:00          | Monthly Sales Dashboard     | 2024-01-10 | /mount/2024/IT/ACME/JRA-1001/monthly_sales.sql | SQL                     | Done    | High      | 2024 | IT
+JRA-1001    | Max Mustermann    | Anna Meier | 2024-02-01 10:00:00          | Monthly Sales Dashboard     | 2024-01-12 | /mount/2024/IT/ACME/JRA-1001/etl_refresh.sql   | SQL                     | Done    | High      | 2024 | IT
+            |                   |            |                              |                             | 2024-01-15 | /mount/oracle_sql/list_tables.sql              | SQL                     | Pending |           |      |
 ```
 
 Der Export enthält:
@@ -207,9 +223,25 @@ Der Export enthält:
 - Zeilenumbruch für lange Summary-/Pfad-/Technologie-Spalten
 - Freeze-Panes und AutoFilter
 - Summenzeile `GESAMT` mit Anzahl der SQL-Dateien
-- Dateiname standardmäßig `<Jira-Task>.xlsx`
+- Gesamtbericht standardmäßig als `jira_report_<YYYY>_<MM>_<DD>.xlsx`
 
 ### Dateiname konfigurieren
+
+Für den Gesamtbericht:
+
+```yaml
+excel:
+  aggregate_report: true
+  aggregate_filename: "jira_report_{YYYY}_{MM}_{DD}.xlsx"
+```
+
+Für den optionalen Modus „ein Bericht pro Task“:
+
+```yaml
+excel:
+  aggregate_report: false
+  output_filename: "{JIRA}.xlsx"
+```
 
 `excel.output_filename` unterstützt Platzhalter:
 
@@ -225,7 +257,7 @@ Der Export enthält:
 Beispiel: `"{YEAR}_{CUSTOMER}_{JIRA}.xlsx"` →
 `2024_ACME_JRA-1001.xlsx`.
 
-Nur wenn **keine** Tasks/SQL-Dateien gefunden werden, wird ein leerer
+Nur wenn **keine** SQL-Dateien gefunden werden, wird ein leerer
 Fallback-Bericht unter `excel.output_path` mit `excel.fallback_filename`
 geschrieben.
 
@@ -234,8 +266,9 @@ geschrieben.
 ## Funktionsweise
 
 1. **Phase 1 – Verzeichnis-Scan:** Alle `.sql`-Dateien unter
-   `scripts.base_path` werden genau einmal gefunden und über den Namen ihres
-   Elternverzeichnisses indexiert. Die Inventur wird als JSON gespeichert.
+   `scripts.base_path` werden genau einmal gefunden und analysiert. Dateien in
+   Task-Verzeichnissen werden zusätzlich nach Jira-Key indexiert. Die Inventur
+   wird als JSON gespeichert.
 2. **Phase 2 – Jira-Anreicherung:** Nur die im Scan gefundenen Task-Keys
    werden in Blöcken von maximal 100 über die Jira-REST-API v3 abgefragt.
    Zwischen den Blöcken wird pausiert.
@@ -244,8 +277,9 @@ geschrieben.
    Pagination bis `performance.max_results`, Timeout und Retries sind
    konfigurierbar. ADF-Beschreibungen (API v3) werden in Text umgewandelt.
 4. **Prefix-Filter:** Task-Keys werden clientseitig gegen `filters.prefix`
-   geprüft (Standard `JRA-`).
-5. **Export:** Ein Excel-Bericht pro Task direkt im Task-Verzeichnis.
+   geprüft (Standard `JRA-`). Dateien ohne Task-Key bleiben im Gesamtbericht.
+5. **Export:** Standardmäßig ein Gesamtbericht unter `excel.output_path`;
+   optional ein Excel-Bericht pro Task direkt im Task-Verzeichnis.
 
 Ohne gültige Jira-Konfiguration läuft `--mode scan` vollständig durch.
 `--mode enrich` wird übersprungen; die vorhandenen Scan-Berichte bleiben
@@ -284,7 +318,9 @@ jira:
   batch_size: 100             # max. 100 Keys pro Request
   batch_delay_seconds: 1.0    # Pause zwischen Blöcken
 excel:
-  output_filename: "{JIRA}.xlsx"
+  output_path: "output"
+  aggregate_report: true
+  aggregate_filename: "jira_report_{YYYY}_{MM}_{DD}.xlsx"
 ```
 
 > **Sicherheit:** `config.yaml` wird mit leerem Token eingecheckt. Trage
@@ -339,7 +375,7 @@ Komplexität.
 
 ```text
 config.py                     gemeinsame Config-/Logging-Schicht
-main.py                       kanonischer Scanner + Excel-Export pro Task
+main.py                       kanonischer Scanner + Gesamt-/Task-Excel-Export
 scanner/main_scanner.py       Kompatibilitäts-Wrapper (delegiert an main.py)
 scripts/script_inventory.py   SQL-Analyse und Inventar-CLI
 api/suggestion_api.py         FastAPI-Service + Dashboard-Auslieferung
@@ -368,8 +404,9 @@ ruff check .
 
 Die Smoke-Tests prüfen u. a. ADF-/Datums-Parsing, Jira-Response-Verarbeitung,
 Prefix-Filter, Task-Key-Ableitung aus der Verzeichnisstruktur, SQL-Matching,
-den Excel-Export pro Task, die Scan-/Enrich-Phasen, die Batch-Grenze von
-maximal 100 Keys und die API-Endpunkte.
+den Gesamtbericht inkl. Dateien außerhalb von Task-Verzeichnissen, den
+optionalen Task-Export, die Scan-/Enrich-Phasen, die Batch-Grenze von maximal
+100 Keys und die API-Endpunkte.
 
 ---
 
@@ -382,7 +419,7 @@ maximal 100 Keys und die API-Endpunkte.
 | 401/403 | Klare Fehlermeldung im Log, Batch wird übersprungen |
 | Scan-Index fehlt bei `enrich` | Verzeichnisstruktur wird automatisch eingelesen |
 | Scan-Root fehlt | Warnung, keine Berichte |
-| SQL-Datei außerhalb eines Task-Verzeichnisses | Warnung, Datei wird ignoriert |
+| SQL-Datei außerhalb eines Task-Verzeichnisses | wird ohne Task-Zuordnung in den Gesamtbericht aufgenommen |
 | Task ohne SQL-Datei | Warnung, kein Bericht für diesen Task |
 | Task-Key nicht in Jira gefunden | Scan-Daten bleiben, Status `Missing` |
 | Einzelne SQL-Datei unlesbar | Warnung, restliche Dateien werden verarbeitet |
@@ -395,7 +432,8 @@ Logs: `logs/jira_scanner.log` (rotierend).
 ## Bekannte Grenzen / nächste Schritte
 
 - Es werden ausschließlich `.sql`-Dateien berücksichtigt.
-- Die Task-Zuordnung hängt strikt an der Verzeichnisstruktur.
+- Die Task-Zuordnung hängt strikt an der Verzeichnisstruktur; Dateien ohne
+  Task-Verzeichnis erscheinen ohne Jira-Nummer im Gesamtbericht.
 - Confluence-Integration ist nur als Konfigurationsblock vorhanden.
 - Gap-Analyse ist eine einfache Referenzprüfung, kein semantisches Matching.
 - Kein automatisches Schreiben zurück nach Jira.
