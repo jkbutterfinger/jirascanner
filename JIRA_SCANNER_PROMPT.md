@@ -4,13 +4,29 @@ JIRA/GIRA SCANNER - SYSTEM- UND NUTZUNGSDOKUMENTATION
 
 SYSTEMBEZEICHNUNG : Jira/Gira Scanner for SQL files with per-task Excel export
 VERSION           : 1.3.0
-PYTHON            : >= 3.9
+PYTHON            : >= 3.9 (CI: 3.10 / 3.11 / 3.12)
 LIZENZ            : MIT
 HAUPTEINSTIEG     : main.py
 STANDARD-PREFIX   : JRA-
+REPOSITORY        : https://github.com/jkbutterfinger/jirascanner
+BRANCH            : main
+STAND             : 2026-11-10
+DOKUMENTATION     : JIRA_SCANNER_PROMPT.md (dieses Dokument), README.md
+
+SETUP             : ./setup.sh [--dev] [--test] [--recreate] [--venv DIR]
+START             : ./run.sh [--mode scan|enrich|all] [--batch-size N] [--batch-delay S]
+VENV              : .venv (wird von setup.sh angelegt, von run.sh automatisch genutzt)
+KONFIGURATION     : config.yaml (Defaults und Umgebungsvariablen: config.py)
+TESTS             : ./setup.sh --dev --test  bzw.  pytest && ruff check .
+SCAN-INDEX        : inventory/scan_index.json (storage.scan_index)
+EXCEL-BERICHT     : <base_path>/<Jahr>/<Abteilung>/<Auftraggeber>/<Jira-Task>/<Jira-Task>.xlsx
+CLI-MODI          : --mode scan | enrich | all (Default: all)
+BATCH-LIMIT       : max. 100 Jira-Keys pro Request (hart begrenzt)
+BATCH-PAUSE       : jira.batch_delay_seconds (Default 1.0 s), CLI --batch-delay
 
 Dieses Dokument beschreibt den tatsächlichen Stand der Implementierung.
-Es ist mit main.py, config.py, config.yaml und der API synchron zu halten.
+Es ist mit main.py, config.py, config.yaml, setup.sh, run.sh und der API
+synchron zu halten.
 
 ================================================================================
 1. ZWECK
@@ -97,7 +113,9 @@ tests/test_smoke.py
   Smoke-Tests für Parsing, Task-Key-Ableitung, Matching, Export und API.
 
 config.yaml        Konfiguration (Token leer lassen, siehe Sicherheit)
-run.sh             Startskript mit Vorabprüfungen
+setup.sh           Python-/venv-Setup: findet Python >= 3.9, legt .venv an,
+                   installiert requirements*.txt und prüft die Kernimporte
+run.sh             Startskript mit Vorabprüfungen; nutzt .venv automatisch
 requirements.txt   Laufzeit-Abhängigkeiten
 requirements-dev.txt  Test-/Lint-Abhängigkeiten
 
@@ -107,8 +125,17 @@ requirements-dev.txt  Test-/Lint-Abhängigkeiten
 
   cd jirascanner
 
+  # Empfohlen: Setup-Skript (idempotent)
+  ./setup.sh                  # Laufzeit-Abhängigkeiten
+  ./setup.sh --dev            # inkl. pytest, ruff, httpx
+  ./setup.sh --recreate       # .venv neu aufbauen
+  ./setup.sh --venv DIR       # andere virtuelle Umgebung
+  PYTHON=python3.12 ./setup.sh
+
+  # Manuell (entspricht dem Setup-Skript)
   python3 -m venv .venv
   source .venv/bin/activate
+  python -m pip install --upgrade pip setuptools wheel
   pip install -r requirements.txt
 
 Laufzeit-Abhängigkeiten:
@@ -221,6 +248,20 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
 5. NUTZUNG
 ================================================================================
 
+5.0 Python-Umgebung einrichten (setup.sh)
+
+  ./setup.sh                  # Python >= 3.9 finden, .venv anlegen,
+                              # Laufzeit-Abhängigkeiten installieren
+  ./setup.sh --dev            # zusätzlich pytest, ruff, httpx
+  ./setup.sh --dev --test     # danach pytest und ruff ausführen
+  ./setup.sh --recreate       # .venv löschen und neu aufbauen
+  ./setup.sh --venv DIR       # andere virtuelle Umgebung verwenden
+  PYTHON=python3.12 ./setup.sh
+
+  Das Skript ist idempotent, prüft die Python-Version, aktualisiert
+  pip/setuptools/wheel und verifiziert die Kernimporte. run.sh erkennt
+  .venv automatisch; ein manuelles "source" ist nicht erforderlich.
+
 5.1 Berichte erzeugen (zweiphasig)
 
   Phase 1 - Verzeichnisstruktur einlesen (ohne Jira):
@@ -249,8 +290,9 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
     python3 main.py --prefix JRA- -v   # DEBUG-Logging
     python3 main.py --config other.yaml
 
-  run.sh prüft Abhängigkeiten, legt output/, logs/, inventory/ und
-  jira_data/ an und gibt den Exit-Code von main.py weiter.
+  run.sh prüft Abhängigkeiten, nutzt .venv automatisch, legt output/,
+  logs/, inventory/ und jira_data/ an und gibt den Exit-Code von main.py
+  weiter.
 
 5.2 SQL-Inventar
 
@@ -269,6 +311,8 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
 
 5.4 Tests
 
+  ./setup.sh --dev --test     # richtet .venv ein, führt pytest + ruff aus
+  # oder manuell:
   pytest
   ruff check .
 
@@ -530,13 +574,13 @@ und Detailmeldung zurückgegeben.
 
   PROBLEM: Excel-Export schlägt fehl
   LÖSUNG:
-  - pip install -r requirements.txt
+  - ./setup.sh ausführen (legt .venv an und installiert die Abhängigkeiten)
   - Schreibrechte auf dem Task-Verzeichnis bzw. excel.output_path prüfen
   - Python-Version >= 3.9 prüfen
 
   PROBLEM: API startet nicht
   LÖSUNG:
-  - pip install -r requirements.txt
+  - ./setup.sh ausführen
   - Port 8000 belegt? API_PORT setzen
   - Importfehler: python -m api.suggestion_api direkt starten
 
@@ -544,6 +588,7 @@ und Detailmeldung zurückgegeben.
 12. TESTS UND QUALITÄT
 ================================================================================
 
+  ./setup.sh --dev --test    # Setup + pytest + ruff in einem Schritt
   pytest
   ruff check .
 
@@ -574,6 +619,58 @@ und Detailmeldung zurückgegeben.
   - Dashboard liest Tasks aus dem Cache; Live-Refresh über ?refresh=true.
   - Weitere Ideen: CI/CD-Integration, Slack/Teams-Benachrichtigung,
     Custom-Templates, erweiterte KI-Gap-Analyse.
+
+================================================================================
+14. METADATEN, DATEIEN UND VERSIONSHISTORIE
+================================================================================
+
+14.1 Projekt-Metadaten
+
+  Projektname       : jira-scanner
+  Paketversion      : 1.3.0 (pyproject.toml)
+  API-Version       : 1.3.0 (api/suggestion_api.py)
+  Repository        : https://github.com/jkbutterfinger/jirascanner
+  Default-Branch    : main
+  Lizenz            : MIT
+  Python            : >= 3.9
+  Standard-Prefix   : JRA-
+  Konfiguration     : config.yaml
+  Scan-Index        : inventory/scan_index.json
+
+14.2 Dateien und Aufgaben
+
+  main.py                       Kanonischer Scanner, CLI, Excel-Export,
+                                zweiphasiger Ablauf (scan/enrich/all)
+  config.py                     Defaults, YAML-Laden, Umgebungsvariablen, Logging
+  config.yaml                   Projektkonfiguration (Token leer lassen)
+  setup.sh                      Python-/venv-Setup und Abhängigkeitsprüfung
+  run.sh                        Startskript, nutzt .venv automatisch
+  requirements.txt              Laufzeit-Abhängigkeiten
+  requirements-dev.txt          Test-/Lint-Abhängigkeiten
+  scanner/main_scanner.py       Kompatibilitäts-Wrapper auf main.py
+  scripts/script_inventory.py   SQL-Analyse und Inventar-CLI
+  api/suggestion_api.py         FastAPI-Service und Dashboard-Auslieferung
+  dashboard/dashboard.html      Weboberfläche
+  tests/test_smoke.py           Smoke-Tests
+  README.md                     Nutzerdokumentation
+  JIRA_SCANNER_PROMPT.md        System- und Nutzungsdokumentation (dieses Dokument)
+
+14.3 Versionshistorie
+
+  1.3.0   Zweiphasiger Ablauf:
+          - --mode scan   : Verzeichnisstruktur einlesen, Berichte mit
+                            Status "Pending" und Scan-Index erzeugen
+          - --mode enrich : Jira-Details in Blöcken von max. 100 Keys
+                            nachladen, konfigurierbare Pause
+          - --mode all    : beide Phasen nacheinander (Default)
+          - --batch-size / --batch-delay sowie jira.batch_size /
+            jira.batch_delay_seconds
+          - Prefix-Filter für Task-Verzeichnisse (Default "JRA-")
+          - setup.sh für reproduzierbares Python-/venv-Setup
+          - run.sh nutzt .venv automatisch
+
+  1.2.0   Einphasiger Lauf: projektweite Jira-Suche, SQL-Scan,
+          Excel-Bericht pro Task.
 
 ================================================================================
 ENDE DER DOKUMENTATION

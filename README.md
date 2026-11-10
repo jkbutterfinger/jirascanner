@@ -47,9 +47,12 @@ Der Scan-Root wird über `scripts.base_path` gesetzt (z. B. `/mount`).
 ```bash
 cd jirascanner
 
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+# Python-Umgebung einrichten (findet Python >= 3.9, legt .venv an,
+# installiert alle Abhängigkeiten)
+./setup.sh
+
+# optional inkl. Test-/Lint-Werkzeugen:
+./setup.sh --dev
 
 # Konfiguration anpassen (Jira-URL, Token, Scan-Root)
 $EDITOR config.yaml
@@ -63,7 +66,7 @@ python3 main.py --mode enrich
 # Beides nacheinander (Default)
 python3 main.py --mode all
 
-# oder mit Komfortprüfungen:
+# oder mit Komfortprüfungen (nutzt .venv automatisch):
 ./run.sh --mode scan
 ```
 
@@ -76,6 +79,24 @@ export JIRA_PROJECT_KEY="JRA"
 export JIRA_SCRIPT_PATH="/mount"
 python3 main.py
 ```
+
+### Setup-Skript
+
+`setup.sh` richtet die Python-Umgebung ein und ist idempotent:
+
+```bash
+./setup.sh                  # Python >= 3.9 finden, .venv anlegen, Laufzeit-Pakete
+./setup.sh --dev            # zusätzlich pytest, ruff, httpx
+./setup.sh --dev --test     # danach pytest und ruff ausführen
+./setup.sh --recreate       # .venv löschen und komplett neu aufbauen
+./setup.sh --venv /tmp/venv # andere virtuelle Umgebung verwenden
+PYTHON=python3.12 ./setup.sh
+```
+
+Das Skript prüft die Python-Version, legt bei Bedarf `.venv` an, aktualisiert
+`pip`/`setuptools`/`wheel`, installiert `requirements.txt` bzw.
+`requirements-dev.txt` und verifiziert die Kernimporte. `run.sh` erkennt die
+`.venv` danach automatisch – ein manuelles `source` ist nicht nötig.
 
 ### CLI-Optionen
 
@@ -323,7 +344,8 @@ api/suggestion_api.py         FastAPI-Service + Dashboard-Auslieferung
 dashboard/dashboard.html      Weboberfläche
 tests/test_smoke.py           Smoke-Tests
 config.yaml                   Konfiguration
-run.sh                        Startskript mit Vorabprüfungen
+setup.sh                      Python-/venv-Setup (Interpreter finden, .venv anlegen)
+run.sh                        Startskript mit Vorabprüfungen (nutzt .venv automatisch)
 requirements.txt              Laufzeit-Abhängigkeiten
 requirements-dev.txt          Test-/Lint-Abhängigkeiten
 ```
@@ -333,8 +355,11 @@ requirements-dev.txt          Test-/Lint-Abhängigkeiten
 ## Tests
 
 ```bash
+./setup.sh --dev --test    # richtet .venv ein, installiert Dev-Pakete,
+                           # führt pytest und ruff aus
+
+# oder manuell:
 source .venv/bin/activate
-pip install -r requirements-dev.txt
 pytest
 ruff check .
 ```

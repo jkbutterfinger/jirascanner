@@ -13,7 +13,16 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR" || exit 1
 
-PYTHON="${PYTHON:-python3}"
+# Virtuelle Umgebung automatisch bevorzugen (kein "source" nötig).
+if [[ -z "${PYTHON:-}" ]]; then
+    if [[ -x "$SCRIPT_DIR/.venv/bin/python" ]]; then
+        PYTHON="$SCRIPT_DIR/.venv/bin/python"
+    elif [[ -x "$SCRIPT_DIR/venv/bin/python" ]]; then
+        PYTHON="$SCRIPT_DIR/venv/bin/python"
+    else
+        PYTHON="python3"
+    fi
+fi
 
 echo "=============================================="
 echo "🔍 JIRA/GIRA SCANNER"
@@ -30,10 +39,10 @@ fi
 if ! "$PYTHON" -c "import yaml, requests, openpyxl" >/dev/null 2>&1; then
     echo "❌ Fehlende Abhängigkeiten."
     echo ""
-    echo "Bitte zuerst installieren:"
-    echo "   $PYTHON -m venv .venv"
-    echo "   source .venv/bin/activate"
-    echo "   pip install -r requirements.txt"
+    echo "Bitte zuerst die Umgebung einrichten:"
+    echo "   ./setup.sh"
+    echo "   # oder inkl. Test-Werkzeugen:"
+    echo "   ./setup.sh --dev"
     echo ""
     exit 1
 fi
