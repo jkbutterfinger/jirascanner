@@ -176,7 +176,7 @@ store = SuggestionStore(_default_db_path())
 
 
 def extract_jira_references(text: str) -> List[str]:
-    """Extrahiert Jira-Keys (z. B. CPU-1234) aus Text."""
+    """Extrahiert Jira-Keys (z. B. JRA-1234) aus Text."""
     return re.findall(r"\b([A-Z][A-Z0-9]+-\d+)\b", text or "")
 
 
@@ -251,7 +251,7 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(
     title="Jira Scanner API",
     description="API für Task-Scanner, Script-Inventar und Requirements-Matching",
-    version="1.2.0",
+    version="1.3.0",
     lifespan=lifespan,
 )
 

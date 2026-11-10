@@ -47,6 +47,8 @@ DEFAULTS: Dict[str, Any] = {
         "inventory_path": str(ROOT / "inventory"),
         "inventory_file": "inventory.json",
         "suggestions_file": "suggestions.json",
+        # Ergebnis der Verzeichnis-/SQL-Inventur für die spätere Anreicherung.
+        "scan_index": str(ROOT / "inventory" / "scan_index.json"),
         "jira_cache": str(ROOT / "jira_data" / "tasks.json"),
     },
     "scripts": {
@@ -66,6 +68,12 @@ DEFAULTS: Dict[str, Any] = {
         "max_results": 1000,
         "timeout": 30,
         "retry_attempts": 3,
+    },
+    "jira": {
+        # Jira-Details werden in Blöcken abgefragt. Maximal 100 Keys pro
+        # Request, damit der Jira-Server nicht überlastet wird.
+        "batch_size": 100,
+        "batch_delay_seconds": 1.0,
     },
     "excel": {
         # Fallback-Ordner nur für leere Berichte ohne Task-Verzeichnis.

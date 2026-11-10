@@ -1,9 +1,18 @@
 #!/usr/bin/env python3
 """Jira/Gira Scanner with per-task Excel export.
 
-Der Scanner sucht ausschließlich SQL-Dateien unterhalb von
-``scripts.base_path``. Die Jira-Referenz wird nicht aus dem Dateiinhalt,
-sondern aus der Verzeichnisstruktur abgeleitet::
+Der Scanner arbeitet in zwei Phasen:
+
+1. ``--mode scan``   liest ausschließlich die Verzeichnisstruktur und erzeugt
+   pro Task einen Excel-Bericht mit den lokal verfügbaren Informationen.
+2. ``--mode enrich`` reichert die bestehenden Berichte mit Jira-Details an.
+   Die Jira-Keys werden in Blöcken von maximal 100 abgefragt, mit einer
+   konfigurierbaren Pause zwischen den Blöcken.
+
+``--mode all`` (Default) führt beide Phasen nacheinander aus.
+
+Die Jira-Referenz wird nicht aus dem Dateiinhalt, sondern aus der
+Verzeichnisstruktur abgeleitet::
 
     <base_path>/<Jahr>/<Abteilung>/<Auftraggeber>/<Jira-Task>/<name>.sql
 
@@ -20,13 +29,15 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import logging
 import re
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from openpyxl import Workbook
@@ -201,6 +212,13 @@ class JiraClient:
         self.retry_attempts = max(1, int(performance.get("retry_attempts", 3)))
         self.max_results = max(1, int(performance.get("max_results", 1000)))
 
+        jira_cfg = self.config.get("jira", {})
+        # Maximal 100 Keys pro Request, damit der Jira-Server geschont wird.
+        self.batch_size = max(1, min(100, int(jira_cfg.get("batch_size", 100))))
+        self.batch_delay = max(
+            0.0, float(jira_cfg.get("batch_delay_seconds", 1.0))
+        )
+
         self.session = requests.Session()
         self.session.headers.update({"Accept": "application/json"})
         if self.token:
@@ -316,29 +334,107 @@ class JiraClient:
 
         tasks: List[JiraIssue] = []
         for issue in raw_issues:
-            key = str(issue.get("key", ""))
-            if prefix and not key.upper().startswith(prefix.upper()):
+            task = self._issue_from_raw(issue)
+            if prefix and not task.key.upper().startswith(prefix.upper()):
                 continue
-            fields = issue.get("fields", {}) or {}
-            task = JiraIssue(
-                key=key,
-                issue_type=(fields.get("issuetype") or {}).get("name", "Task"),
-                status=(fields.get("status") or {}).get("name", ""),
-                priority=self._get_priority(
-                    (fields.get("priority") or {}).get("name", "")
-                ),
-                summary=fields.get("summary", "") or "",
-                description=adf_to_text(fields.get("description")).strip(),
-                reporter=(fields.get("reporter") or {}).get("displayName", ""),
-                assignee=(fields.get("assignee") or {}).get("displayName", ""),
-                created=fields.get("created", "") or "",
-                resolved=fields.get("resolutiondate", "") or "",
-                labels=list(fields.get("labels", []) or []),
-            )
             tasks.append(task)
 
         LOGGER.info("%s Task(s) mit Prefix %s gefunden", len(tasks), prefix)
         return tasks
+
+    def fetch_tasks_by_keys(
+        self,
+        keys: List[str],
+        batch_size: Optional[int] = None,
+        batch_delay: Optional[float] = None,
+    ) -> Dict[str, JiraIssue]:
+        """Lädt Jira-Details für konkrete Keys in Blöcken (max. 100).
+
+        Die Keys stammen aus der Verzeichnisstruktur. Dadurch werden nur
+        tatsächlich vorhandene Tasks abgefragt. Zwischen den Blöcken wird
+        eine konfigurierbare Pause eingelegt, um den Jira-Server zu schonen.
+        """
+        unique_keys: List[str] = []
+        seen: set[str] = set()
+        for key in keys:
+            normalized = str(key).strip().upper()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                unique_keys.append(normalized)
+
+        if not unique_keys:
+            return {}
+        if not self.is_configured():
+            LOGGER.warning(
+                "Jira ist nicht konfiguriert (server.url/api.token) – "
+                "Anreicherung wird übersprungen."
+            )
+            return {}
+
+        size = self.batch_size if batch_size is None else int(batch_size)
+        size = max(1, min(100, size))
+        delay = self.batch_delay if batch_delay is None else float(batch_delay)
+        delay = max(0.0, delay)
+
+        result: Dict[str, JiraIssue] = {}
+        total_batches = (len(unique_keys) + size - 1) // size
+        for batch_index, start in enumerate(
+            range(0, len(unique_keys), size), start=1
+        ):
+            chunk = unique_keys[start : start + size]
+            jql = "key in (" + ", ".join(f'"{key}"' for key in chunk) + ")"
+            LOGGER.info(
+                "Jira-Batch %s/%s: %s Key(s) werden geladen",
+                batch_index,
+                total_batches,
+                len(chunk),
+            )
+            try:
+                raw_issues = self._fetch_issues(jql)
+            except JiraError as exc:
+                LOGGER.error(
+                    "Jira-Batch %s/%s fehlgeschlagen: %s",
+                    batch_index,
+                    total_batches,
+                    exc,
+                )
+                continue
+
+            for issue in raw_issues:
+                task = self._issue_from_raw(issue)
+                if task.key.upper() in seen:
+                    result[task.key.upper()] = task
+
+            if delay and batch_index < total_batches:
+                LOGGER.debug(
+                    "Warte %.1f Sekunde(n) vor dem nächsten Jira-Batch", delay
+                )
+                time.sleep(delay)
+
+        LOGGER.info(
+            "%s von %s Jira-Task(s) angereichert", len(result), len(unique_keys)
+        )
+        return result
+
+    @staticmethod
+    def _issue_from_raw(issue: Dict[str, Any]) -> JiraIssue:
+        """Wandelt eine Jira-Rohantwort in ein ``JiraIssue`` um."""
+        fields = issue.get("fields", {}) or {}
+        return JiraIssue(
+            key=str(issue.get("key", "")),
+            issue_type=(fields.get("issuetype") or {}).get("name", "Task"),
+            status=(fields.get("status") or {}).get("name", ""),
+            priority=JiraClient._get_priority(
+                (fields.get("priority") or {}).get("name", "")
+            ),
+            summary=fields.get("summary", "") or "",
+            description=adf_to_text(fields.get("description")).strip(),
+            reporter=(fields.get("reporter") or {}).get("displayName", ""),
+            assignee=(fields.get("assignee") or {}).get("displayName", ""),
+            created=fields.get("created", "") or "",
+            resolved=fields.get("resolutiondate", "") or "",
+            labels=list(fields.get("labels", []) or []),
+        )
 
     @staticmethod
     def _get_priority(priority_name: str) -> str:
@@ -505,6 +601,74 @@ class ScriptScanner:
         if not matches:
             return None
         return Path(matches[0]["path"]).parent
+
+
+def scan_index_path(config: Dict[str, Any]) -> Path:
+    """Pfad zur JSON-Ablage der Verzeichnis-/SQL-Inventur."""
+    storage = config.get("storage", {})
+    value = storage.get("scan_index", ROOT / "inventory" / "scan_index.json")
+    return resolve_path(value)
+
+
+def build_scan_index(
+    scanner: ScriptScanner,
+    index: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+) -> Dict[str, Any]:
+    """Erzeugt eine serialisierbare Beschreibung der Verzeichnisstruktur.
+
+    Das Ergebnis enthält pro Task-Key das Verzeichnis, den Pfadkontext
+    (Jahr/Abteilung/Auftraggeber) und alle gefundenen SQL-Dateien. Es dient
+    als Eingabe für die spätere Jira-Anreicherung (``--mode enrich``).
+    """
+    task_index = index if index is not None else scanner.build_index()
+    tasks: Dict[str, Any] = {}
+    for task_key in sorted(task_index):
+        matches = task_index[task_key]
+        if not matches:
+            continue
+        directory = Path(matches[0]["path"]).parent
+        tasks[task_key] = {
+            "directory": str(directory),
+            "path_context": derive_path_context(directory),
+            "files": matches,
+        }
+
+    return {
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "base_path": str(scanner.base_path),
+        "task_count": len(tasks),
+        "file_count": sum(len(entry["files"]) for entry in tasks.values()),
+        "tasks": tasks,
+    }
+
+
+def save_scan_index(config: Dict[str, Any], data: Dict[str, Any]) -> Path:
+    """Schreibt die Scan-Inventur als JSON."""
+    path = scan_index_path(config)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    LOGGER.info("Scan-Index gespeichert: %s", path)
+    return path
+
+
+def load_scan_index(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Lädt eine zuvor erzeugte Scan-Inventur, falls vorhanden."""
+    path = scan_index_path(config)
+    if not path.exists():
+        LOGGER.warning("Scan-Index nicht gefunden: %s", path)
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        LOGGER.warning("Scan-Index konnte nicht gelesen werden (%s): %s", path, exc)
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("tasks"), dict):
+        LOGGER.warning("Scan-Index hat ein unerwartetes Format: %s", path)
+        return None
+    return data
 
 
 class ExcelExporter:
@@ -718,6 +882,56 @@ def build_rows_for_task(
     return rows
 
 
+def build_scan_rows(
+    task_key: str, matches: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Baut Zeilen ausschließlich aus Verzeichnisinformationen (ohne Jira).
+
+    Die Jira-Spalten bleiben leer und werden in ``--mode enrich`` ergänzt.
+    """
+    if not matches:
+        row = empty_report_row(task_key)
+        row["Zusammenfassung-Anforderung"] = (
+            "Keine SQL-Datei im Task-Verzeichnis"
+        )
+        row["Status"] = "Pending"
+        return [row]
+
+    rows: List[Dict[str, Any]] = []
+    for match in matches:
+        rows.append(
+            {
+                "Jira-Nummer": task_key,
+                "Jira-Auftraggeber": "",
+                "Entwickler": "",
+                "Jahr/Monat/Tag-Abgeschlossen": "",
+                "Zusammenfassung-Anforderung": "",
+                "File-Datum": format_date(match.get("modified_date")),
+                "File-Location": match.get("path", ""),
+                "Verwendete-Technologien": ", ".join(
+                    match.get("technologies", [])[:8]
+                ),
+                "Status": "Pending",
+                "Priorität": "",
+            }
+        )
+    return rows
+
+
+def build_enriched_rows(
+    task_key: str,
+    task: Optional[JiraIssue],
+    matches: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Baut Zeilen mit Jira-Details; ohne Jira-Treffer bleiben Scan-Daten."""
+    if task is None:
+        rows = build_scan_rows(task_key, matches)
+        for row in rows:
+            row["Status"] = "Missing"
+        return rows
+    return build_rows_for_task(task, matches)
+
+
 def build_report(
     tasks: List[JiraIssue], scanner: ScriptScanner
 ) -> List[Dict[str, Any]]:
@@ -744,15 +958,188 @@ def empty_report_row(prefix: str = "JRA-") -> Dict[str, Any]:
     }
 
 
+def filter_scan_data_by_prefix(
+    scan_data: Dict[str, Any], prefix: Optional[str]
+) -> Dict[str, Any]:
+    """Filtert die Inventur auf Task-Keys mit dem konfigurierten Prefix."""
+    if not prefix:
+        return scan_data
+
+    prefix_upper = prefix.upper()
+    all_tasks = scan_data.get("tasks", {})
+    kept = {
+        key: entry
+        for key, entry in all_tasks.items()
+        if key.upper().startswith(prefix_upper)
+    }
+    ignored = sorted(set(all_tasks) - set(kept))
+    if ignored:
+        LOGGER.info(
+            "%s Task(s) außerhalb des Prefix %s werden ignoriert: %s",
+            len(ignored),
+            prefix,
+            ", ".join(ignored),
+        )
+
+    filtered = dict(scan_data)
+    filtered["tasks"] = kept
+    filtered["task_count"] = len(kept)
+    filtered["file_count"] = sum(len(entry["files"]) for entry in kept.values())
+    return filtered
+
+
+def run_scan_phase(
+    config: Dict[str, Any],
+    exporter: ExcelExporter,
+    dry_run: bool = False,
+    prefix: Optional[str] = None,
+) -> Tuple[Dict[str, Any], List[str], List[Dict[str, Any]]]:
+    """Phase 1: Verzeichnisstruktur einlesen und Berichte soweit möglich bauen.
+
+    Es findet kein Jira-Zugriff statt. Die Jira-Spalten bleiben leer und
+    können später mit ``run_enrich_phase`` ergänzt werden.
+    """
+    scanner = ScriptScanner(config)
+    index = scanner.build_index()
+    scan_data = filter_scan_data_by_prefix(
+        build_scan_index(scanner, index), prefix
+    )
+
+    written: List[str] = []
+    rows_all: List[Dict[str, Any]] = []
+
+    if not scan_data["tasks"]:
+        fallback_prefix = prefix or str(
+            config.get("filters", {}).get("prefix", "JRA-")
+        )
+        LOGGER.warning(
+            "Keine SQL-Dateien in Task-Verzeichnissen gefunden – "
+            "es wird ein leerer Fallback-Bericht erzeugt."
+        )
+        rows_all = [empty_report_row(fallback_prefix)]
+        if not dry_run:
+            written.append(exporter.export(rows_all))
+        return scan_data, written, rows_all
+
+    if not dry_run:
+        save_scan_index(config, scan_data)
+
+    for task_key, entry in scan_data["tasks"].items():
+        rows = build_scan_rows(task_key, entry["files"])
+        rows_all.extend(rows)
+        if dry_run:
+            continue
+        first_file = Path(entry["files"][0]["path"])
+        written.append(
+            exporter.export_task(
+                task_key,
+                rows,
+                Path(entry["directory"]),
+                sql_stem=first_file.stem,
+                path_context=entry.get("path_context"),
+            )
+        )
+
+    return scan_data, written, rows_all
+
+
+def run_enrich_phase(
+    config: Dict[str, Any],
+    exporter: ExcelExporter,
+    scan_data: Dict[str, Any],
+    batch_size: Optional[int] = None,
+    batch_delay: Optional[float] = None,
+    dry_run: bool = False,
+) -> Tuple[List[str], List[Dict[str, Any]]]:
+    """Phase 2: Jira-Details für die gefundenen Task-Keys nachladen.
+
+    Die Keys werden in Blöcken von maximal 100 abgefragt. Zwischen den
+    Blöcken wird gemäß ``jira.batch_delay_seconds`` pausiert.
+    """
+    tasks = scan_data.get("tasks", {}) if scan_data else {}
+    if not tasks:
+        LOGGER.warning("Keine Tasks im Scan-Index – Anreicherung wird übersprungen.")
+        return [], []
+
+    client = JiraClient(config)
+    if not client.is_configured():
+        LOGGER.warning(
+            "Jira ist nicht konfiguriert – Anreicherung wird übersprungen; "
+            "die Scan-Berichte bleiben unverändert."
+        )
+        return [], []
+
+    jira_tasks = client.fetch_tasks_by_keys(
+        list(tasks.keys()),
+        batch_size=batch_size,
+        batch_delay=batch_delay,
+    )
+
+    written: List[str] = []
+    rows_all: List[Dict[str, Any]] = []
+    missing: List[str] = []
+
+    for task_key, entry in tasks.items():
+        task = jira_tasks.get(task_key.upper())
+        if task is None:
+            missing.append(task_key)
+        rows = build_enriched_rows(task_key, task, entry["files"])
+        rows_all.extend(rows)
+        if dry_run:
+            continue
+        first_file = Path(entry["files"][0]["path"])
+        written.append(
+            exporter.export_task(
+                task_key,
+                rows,
+                Path(entry["directory"]),
+                sql_stem=first_file.stem,
+                path_context=entry.get("path_context"),
+            )
+        )
+
+    if missing:
+        LOGGER.warning(
+            "Für %s Task(s) wurden keine Jira-Details gefunden: %s",
+            len(missing),
+            ", ".join(missing),
+        )
+    return written, rows_all
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """CLI-Einstiegspunkt."""
     parser = argparse.ArgumentParser(
         description=(
-            "Jira/Gira Scanner – sucht SQL-Dateien, leitet den Jira-Task aus "
-            "der Verzeichnisstruktur ab und schreibt ein Excel pro Auftrag."
-        )
+            "Jira/Gira Scanner – Phase 1 liest die Verzeichnisstruktur und "
+            "erzeugt Excel-Berichte; Phase 2 reichert sie mit Jira-Details an."
+        ),
+        epilog=(
+            "Beispiele: main.py --mode scan | main.py --mode enrich | "
+            "main.py --mode all --batch-size 50 --batch-delay 2"
+        ),
     )
     parser.add_argument("--config", help="Pfad zur config.yaml")
+    parser.add_argument(
+        "--mode",
+        choices=("scan", "enrich", "all"),
+        default="all",
+        help=(
+            "scan: nur Verzeichnisstruktur ohne Jira; "
+            "enrich: Jira-Details nachladen; "
+            "all: beides nacheinander (Default)"
+        ),
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        help="Jira-Keys pro Request (1-100, Default aus jira.batch_size)",
+    )
+    parser.add_argument(
+        "--batch-delay",
+        type=float,
+        help="Pause zwischen Jira-Batches in Sekunden",
+    )
     parser.add_argument(
         "--prefix",
         help="Key-Prefix (überschreibt filters.prefix, Standard: JRA-)",
@@ -770,86 +1157,83 @@ def main(argv: Optional[List[str]] = None) -> int:
     prefix = args.prefix or str(config.get("filters", {}).get("prefix", "JRA-"))
 
     LOGGER.info("=" * 70)
-    LOGGER.info("Jira/Gira Scanner gestartet (Prefix: %s)", prefix)
+    LOGGER.info(
+        "Jira/Gira Scanner gestartet (Modus: %s, Prefix: %s)", args.mode, prefix
+    )
     LOGGER.info("=" * 70)
 
-    client = JiraClient(config)
-    scanner = ScriptScanner(config)
     exporter = ExcelExporter(config)
-
-    tasks = client.search_tasks(prefix=prefix)
-    if not tasks:
-        LOGGER.warning("Keine Tasks gefunden – es wird ein leerer Fallback-Bericht erzeugt.")
-        rows = [empty_report_row(prefix)]
-        if args.dry_run:
-            exporter.export_simple(rows)
-            return 0
-        try:
-            output_path = exporter.export(rows)
-        except OSError as exc:
-            LOGGER.error("Bericht konnte nicht geschrieben werden: %s", exc)
-            return 1
-        LOGGER.info("Fertig: %s", output_path)
-        return 0
-
+    scan_data: Optional[Dict[str, Any]] = None
     written: List[str] = []
-    unmatched: List[str] = []
     all_rows: List[Dict[str, Any]] = []
 
-    for task in tasks:
-        matches = scanner.get_task_info(task)
-        rows = build_rows_for_task(task, matches)
-        all_rows.extend(rows)
-
-        if not matches:
-            unmatched.append(task.key)
-            continue
-        if args.dry_run:
-            continue
-
-        directory = Path(matches[0]["path"]).parent
-        sql_stem = Path(matches[0]["path"]).stem
-        path_context = derive_path_context(directory)
-        try:
-            written.append(
-                exporter.export_task(
-                    task.key,
-                    rows,
-                    directory,
-                    sql_stem=sql_stem,
-                    path_context=path_context,
-                )
+    try:
+        if args.mode in ("scan", "all"):
+            scan_data, scan_written, scan_rows = run_scan_phase(
+                config, exporter, dry_run=args.dry_run, prefix=prefix
             )
-        except OSError as exc:
-            LOGGER.error("Bericht für %s konnte nicht geschrieben werden: %s", task.key, exc)
-            return 1
+            written.extend(scan_written)
+            all_rows.extend(scan_rows)
+            LOGGER.info(
+                "%s Task-Verzeichnis(se) mit %s SQL-Datei(en) gefunden",
+                scan_data.get("task_count", 0),
+                scan_data.get("file_count", 0),
+            )
+            if args.mode == "scan":
+                if args.dry_run:
+                    exporter.export_simple(all_rows)
+                else:
+                    LOGGER.info(
+                        "Scan-Phase abgeschlossen: %s Bericht(e) geschrieben",
+                        len(written),
+                    )
+                return 0
+            if not scan_data.get("tasks"):
+                if args.dry_run:
+                    exporter.export_simple(all_rows)
+                return 0
+        else:
+            scan_data = load_scan_index(config)
+            if scan_data is None:
+                LOGGER.warning(
+                    "Kein Scan-Index vorhanden – Verzeichnisstruktur wird "
+                    "zuerst eingelesen."
+                )
+                scan_data, scan_written, scan_rows = run_scan_phase(
+                    config, exporter, dry_run=args.dry_run, prefix=prefix
+                )
+                written.extend(scan_written)
+                all_rows.extend(scan_rows)
+                if not scan_data.get("tasks"):
+                    if args.dry_run:
+                        exporter.export_simple(all_rows)
+                    return 0
+
+        enrich_written, enrich_rows = run_enrich_phase(
+            config,
+            exporter,
+            scan_data or {},
+            batch_size=args.batch_size,
+            batch_delay=args.batch_delay,
+            dry_run=args.dry_run,
+        )
+        written.extend(enrich_written)
+        all_rows.extend(enrich_rows)
+    except OSError as exc:
+        LOGGER.error("Bericht konnte nicht geschrieben werden: %s", exc)
+        return 1
 
     if args.dry_run:
         exporter.export_simple(all_rows)
         return 0
 
-    if unmatched:
-        LOGGER.warning(
-            "Für %s Task(s) wurde keine SQL-Datei gefunden: %s",
-            len(unmatched),
-            ", ".join(unmatched),
-        )
-
-    if not written:
-        LOGGER.warning(
-            "Keine SQL-Dateien in Task-Verzeichnissen gefunden – "
-            "es wird ein leerer Fallback-Bericht erzeugt."
-        )
-        try:
-            output_path = exporter.export([empty_report_row(prefix)])
-        except OSError as exc:
-            LOGGER.error("Bericht konnte nicht geschrieben werden: %s", exc)
-            return 1
-        LOGGER.info("Fertig: %s", output_path)
+    unique_written = list(dict.fromkeys(written))
+    if not unique_written:
+        LOGGER.warning("Keine Berichte geschrieben.")
         return 0
 
-    LOGGER.info("Fertig: %s Excel-Bericht(e) geschrieben", len(written))
-    for path in written:
+    LOGGER.info("Fertig: %s Excel-Bericht(e) geschrieben", len(unique_written))
+    for path in unique_written:
         LOGGER.info("  %s", path)
     return 0
 

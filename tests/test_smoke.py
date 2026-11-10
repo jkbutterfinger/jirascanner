@@ -6,9 +6,11 @@ Ausführen:
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from unittest.mock import patch
 
+import yaml
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 
@@ -18,10 +20,16 @@ from main import (
     JiraIssue,
     ScriptScanner,
     adf_to_text,
+    build_enriched_rows,
     build_report,
+    build_scan_index,
+    build_scan_rows,
     derive_path_context,
     empty_report_row,
     format_datetime,
+    load_scan_index,
+    main,
+    save_scan_index,
     task_key_from_directory,
 )
 from scripts.script_inventory import ScriptAnalyzer
@@ -239,6 +247,218 @@ def test_script_analyzer_only_sql_and_directory_reference(tmp_path: Path) -> Non
     assert inventory[0]["task_key"] == "JRA-2002"
     assert "SQL" in inventory[0]["technologies"]
     assert "api_calls" in inventory[0]
+
+
+def test_fetch_tasks_by_keys_uses_batches_of_max_100() -> None:
+    keys = [f"JRA-{index}" for index in range(1, 206)]
+    client = JiraClient(BASE_CONFIG)
+    calls: list[str] = []
+
+    def fake_fetch(jql: str) -> list[dict]:
+        calls.append(jql)
+        found = re.findall(r'"([A-Z]+-\d+)"', jql)
+        return [{"key": key, "fields": {"summary": f"Task {key}"}} for key in found]
+
+    with patch.object(client, "_fetch_issues", side_effect=fake_fetch), patch(
+        "main.time.sleep"
+    ) as sleep_mock:
+        tasks = client.fetch_tasks_by_keys(keys, batch_size=100, batch_delay=0.5)
+
+    assert len(tasks) == 205
+    assert len(calls) == 3
+    assert [len(re.findall(r'"([A-Z]+-\d+)"', jql)) for jql in calls] == [
+        100,
+        100,
+        5,
+    ]
+    assert sleep_mock.call_count == 2
+    sleep_mock.assert_called_with(0.5)
+
+    # Größere Werte werden auf das harte Maximum von 100 begrenzt.
+    calls.clear()
+    with patch.object(client, "_fetch_issues", side_effect=fake_fetch), patch(
+        "main.time.sleep"
+    ):
+        client.fetch_tasks_by_keys(keys, batch_size=500, batch_delay=0)
+    assert len(calls) == 3
+
+
+def test_build_scan_and_enriched_rows(tmp_path: Path) -> None:
+    match = {
+        "path": str(tmp_path / "report.sql"),
+        "modified_date": "2024-01-10 12:00:00",
+        "technologies": ["SQL"],
+    }
+
+    scan_rows = build_scan_rows("JRA-1001", [match])
+    assert scan_rows[0]["Status"] == "Pending"
+    assert scan_rows[0]["Jira-Auftraggeber"] == ""
+    assert scan_rows[0]["File-Datum"] == "2024-01-10"
+    assert scan_rows[0]["File-Location"].endswith("report.sql")
+
+    missing = build_enriched_rows("JRA-1001", None, [match])
+    assert missing[0]["Status"] == "Missing"
+    assert missing[0]["File-Location"].endswith("report.sql")
+
+    task = JiraIssue(
+        key="JRA-1001",
+        summary="Monthly Sales",
+        status="Done",
+        priority="High",
+        reporter="Max",
+        assignee="Anna",
+        resolved="2024-02-01T10:00:00.000+0000",
+    )
+    enriched = build_enriched_rows("JRA-1001", task, [match])
+    assert enriched[0]["Status"] == "Done"
+    assert enriched[0]["Jira-Auftraggeber"] == "Max"
+    assert enriched[0]["Jahr/Monat/Tag-Abgeschlossen"] == "2024-02-01 10:00:00"
+
+
+def test_scan_index_roundtrip(tmp_path: Path) -> None:
+    mount = tmp_path / "mount"
+    task_dir = mount / "2024" / "IT" / "ACME" / "JRA-1001"
+    _write_file(task_dir, "report.sql", "SELECT 1;\n")
+
+    config = {
+        **BASE_CONFIG,
+        "scripts": {**BASE_CONFIG["scripts"], "base_path": str(mount)},
+        "storage": {"scan_index": str(tmp_path / "inventory" / "scan_index.json")},
+    }
+    scanner = ScriptScanner(config)
+    data = build_scan_index(scanner)
+    path = save_scan_index(config, data)
+    loaded = load_scan_index(config)
+
+    assert path.exists()
+    assert loaded is not None
+    assert loaded["task_count"] == 1
+    assert loaded["file_count"] == 1
+    assert loaded["tasks"]["JRA-1001"]["files"][0]["path"].endswith("report.sql")
+
+
+def _write_cli_config(tmp_path: Path, mount: Path) -> Path:
+    config = {
+        "server": {"url": "https://jira.example.com"},
+        "api": {"token": "test-token"},
+        "project": {"key": "JRA", "jql": ""},
+        "filters": {"prefix": "JRA-"},
+        "scripts": {
+            "base_path": str(mount),
+            "extensions": [".sql"],
+            "include_subdirectories": True,
+            "exclude": [],
+        },
+        "storage": {"scan_index": str(tmp_path / "inventory" / "scan_index.json")},
+        "excel": {**EXCEL_CONFIG, "output_path": str(tmp_path / "output")},
+        "logging": {
+            "level": "ERROR",
+            "output_file": str(tmp_path / "logs" / "test.log"),
+        },
+        "jira": {"batch_size": 100, "batch_delay_seconds": 0.0},
+    }
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    return path
+
+
+def test_cli_scan_and_enrich_modes(tmp_path: Path) -> None:
+    mount = tmp_path / "mount"
+    task_dir = mount / "2024" / "IT" / "ACME" / "JRA-1001"
+    _write_file(task_dir, "report.sql", "SELECT 1;\n")
+    config_path = _write_cli_config(tmp_path, mount)
+
+    # Phase 1: nur Verzeichnisstruktur, kein Jira-Zugriff.
+    assert main(["--mode", "scan", "--config", str(config_path)]) == 0
+    report = task_dir / "JRA-1001.xlsx"
+    assert report.exists()
+    assert (tmp_path / "inventory" / "scan_index.json").exists()
+    scan_sheet = load_workbook(report).active
+    assert scan_sheet.cell(2, 9).value == "Pending"
+    assert scan_sheet.cell(2, 2).value in (None, "")
+
+    # Phase 2: Jira-Details anreichern (Batch-Parameter werden durchgereicht).
+    task = JiraIssue(
+        key="JRA-1001",
+        summary="Monthly Sales",
+        status="Done",
+        priority="High",
+        reporter="Max",
+        assignee="Anna",
+        resolved="2024-02-01T10:00:00.000+0000",
+    )
+    with patch.object(
+        JiraClient, "fetch_tasks_by_keys", return_value={"JRA-1001": task}
+    ) as fetch_mock:
+        assert (
+            main(
+                [
+                    "--mode",
+                    "enrich",
+                    "--config",
+                    str(config_path),
+                    "--batch-size",
+                    "50",
+                    "--batch-delay",
+                    "0",
+                ]
+            )
+            == 0
+        )
+
+    fetch_mock.assert_called_once()
+    assert fetch_mock.call_args.kwargs["batch_size"] == 50
+    assert fetch_mock.call_args.kwargs["batch_delay"] == 0.0
+
+    enriched_sheet = load_workbook(report).active
+    assert enriched_sheet.cell(2, 2).value == "Max"
+    assert enriched_sheet.cell(2, 9).value == "Done"
+    assert enriched_sheet.cell(2, 10).value == "High"
+
+
+def test_scan_phase_filters_foreign_prefix(tmp_path: Path) -> None:
+    mount = tmp_path / "mount"
+    jra_dir = mount / "2024" / "IT" / "ACME" / "JRA-1001"
+    ops_dir = mount / "2024" / "IT" / "ACME" / "OPS-1"
+    _write_file(jra_dir, "report.sql", "SELECT 1;\n")
+    _write_file(ops_dir, "foreign.sql", "SELECT 2;\n")
+    config_path = _write_cli_config(tmp_path, mount)
+
+    assert (
+        main(
+            [
+                "--mode",
+                "scan",
+                "--prefix",
+                "JRA-",
+                "--config",
+                str(config_path),
+            ]
+        )
+        == 0
+    )
+    assert (jra_dir / "JRA-1001.xlsx").exists()
+    assert not (ops_dir / "OPS-1.xlsx").exists()
+
+
+def test_enrich_without_jira_keeps_scan_report(tmp_path: Path) -> None:
+    mount = tmp_path / "mount"
+    task_dir = mount / "2024" / "IT" / "ACME" / "JRA-1001"
+    _write_file(task_dir, "report.sql", "SELECT 1;\n")
+    config_path = _write_cli_config(tmp_path, mount)
+
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    data["server"]["url"] = "https://your-jira-server.com"
+    data["api"]["token"] = ""
+    config_path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    assert main(["--mode", "scan", "--config", str(config_path)]) == 0
+    report = task_dir / "JRA-1001.xlsx"
+    assert load_workbook(report).active.cell(2, 9).value == "Pending"
+
+    # Ohne Jira-Konfiguration darf enrich den Scan-Bericht nicht verändern.
+    assert main(["--mode", "enrich", "--config", str(config_path)]) == 0
+    assert load_workbook(report).active.cell(2, 9).value == "Pending"
 
 
 def test_api_endpoints(tmp_path: Path) -> None:

@@ -5,7 +5,7 @@ Die Jira-Referenz wird aus der Verzeichnisstruktur abgeleitet – nicht aus dem
 Dateiinhalt. Für jeden Jira-Task (Auftrag) wird ein eigener Excel-Bericht
 direkt im Task-Verzeichnis abgelegt.
 
-**Standard-Prefix:** `JRA-` · **Version:** 1.2.0 · **Python:** ≥ 3.9
+**Standard-Prefix:** `JRA-` · **Version:** 1.3.0 · **Python:** ≥ 3.9
 
 ---
 
@@ -54,10 +54,17 @@ pip install -r requirements.txt
 # Konfiguration anpassen (Jira-URL, Token, Scan-Root)
 $EDITOR config.yaml
 
-# Berichte erzeugen
-python3 main.py
+# Phase 1: Verzeichnisstruktur einlesen (ohne Jira)
+python3 main.py --mode scan
+
+# Phase 2: Jira-Details nachladen (max. 100 Keys pro Request)
+python3 main.py --mode enrich
+
+# Beides nacheinander (Default)
+python3 main.py --mode all
+
 # oder mit Komfortprüfungen:
-./run.sh
+./run.sh --mode scan
 ```
 
 Alternativ Token per Umgebungsvariable (empfohlen, kein Secret in Git):
@@ -74,9 +81,68 @@ python3 main.py
 
 ```bash
 python3 main.py --help
-python3 main.py --dry-run          # nur Konsole, keine Datei
-python3 main.py --prefix JRA- -v   # DEBUG-Logging
+python3 main.py --mode scan                      # nur Verzeichnisstruktur
+python3 main.py --mode enrich                    # Jira-Details nachladen
+python3 main.py --mode all                       # beides (Default)
+python3 main.py --mode enrich --batch-size 50 --batch-delay 2
+python3 main.py --mode all --dry-run             # nur Konsole, keine Datei
+python3 main.py --prefix JRA- -v                 # DEBUG-Logging
 python3 main.py --config other.yaml
+```
+
+---
+
+## Aufrufmodi
+
+Der Scanner ist in zwei Phasen aufgeteilt, die einzeln oder zusammen laufen.
+
+### 1. Verzeichnisstruktur einlesen (ohne Jira)
+
+```bash
+python3 main.py --mode scan
+```
+
+- Liest ausschließlich die Verzeichnisstruktur und die `.sql`-Dateien.
+- Erzeugt pro Task bereits `<Jira-Task>.xlsx` mit File-Datum, Pfad und
+  erkannten Technologien.
+- Jira-Spalten bleiben leer, Status = `Pending`.
+- Schreibt die Inventur nach `storage.scan_index` (Standard:
+  `inventory/scan_index.json`).
+- Berücksichtigt nur Task-Keys mit `filters.prefix` (Standard `JRA-`);
+  `--prefix` überschreibt den Wert.
+- Benötigt keine Jira-Konfiguration und keinen Jira-Zugriff.
+
+### 2. Jira-Details anreichern
+
+```bash
+python3 main.py --mode enrich
+```
+
+- Liest den Scan-Index. Fehlt er, wird die Verzeichnisstruktur automatisch
+  zuerst eingelesen.
+- Fragt nur die tatsächlich gefundenen Task-Keys ab (kein projektweiter Scan).
+- Holt die Details in Blöcken von **maximal 100 Keys** pro Request.
+- Pausiert zwischen den Blöcken (`jira.batch_delay_seconds`, Standard 1 s),
+  damit der Jira-Server nicht überlastet wird.
+- Schreibt die angereicherten Berichte in die jeweiligen Task-Verzeichnisse.
+- Keys ohne Jira-Treffer behalten die Scan-Daten und erhalten Status
+  `Missing`.
+
+Parameter:
+
+```bash
+python3 main.py --mode enrich --batch-size 50 --batch-delay 2
+```
+
+| Option | Bedeutung | Default |
+|--------|-----------|---------|
+| `--batch-size` | Keys pro Jira-Request (wird auf 1–100 begrenzt) | `jira.batch_size` (100) |
+| `--batch-delay` | Pause zwischen Blöcken in Sekunden | `jira.batch_delay_seconds` (1.0) |
+
+### Beides nacheinander
+
+```bash
+python3 main.py --mode all      # Default
 ```
 
 ---
@@ -98,6 +164,10 @@ alle 10 Spalten nebeneinander und eine Zeile pro gefundener SQL-Datei:
 | 8 | Verwendete-Technologien | `SQL` plus erkannte Dialekt-Hinweise |
 | 9 | Status | Jira-Status |
 | 10 | Priorität | Jira-Priorität (normalisiert) |
+
+In Phase 1 (`--mode scan`) bleiben die Jira-Spalten 2–5, 9 und 10 leer;
+Status ist `Pending`. Phase 2 (`--mode enrich`) füllt sie mit den
+Jira-Details.
 
 Beispiel für `/mount/2024/IT/ACME/JRA-1001/JRA-1001.xlsx`:
 
@@ -140,21 +210,23 @@ geschrieben.
 
 ## Funktionsweise
 
-1. **Jira-Abfrage** über REST API v3.
-   - Bevorzugt `/rest/api/3/search/jql` mit `nextPageToken`.
-   - Fällt bei älteren Servern auf `/rest/api/3/search` mit `startAt` zurück.
-   - Pagination bis `performance.max_results`, Timeout und Retries konfigurierbar.
-   - ADF-Beschreibungen (API v3) werden in Text umgewandelt.
-2. **Prefix-Filter:** Task-Keys werden clientseitig gegen `filters.prefix`
+1. **Phase 1 – Verzeichnis-Scan:** Alle `.sql`-Dateien unter
+   `scripts.base_path` werden genau einmal gefunden und über den Namen ihres
+   Elternverzeichnisses indexiert. Die Inventur wird als JSON gespeichert.
+2. **Phase 2 – Jira-Anreicherung:** Nur die im Scan gefundenen Task-Keys
+   werden in Blöcken von maximal 100 über die Jira-REST-API v3 abgefragt.
+   Zwischen den Blöcken wird pausiert.
+3. **Jira-Abfrage:** Bevorzugt `/rest/api/3/search/jql` mit `nextPageToken`.
+   Fällt bei älteren Servern auf `/rest/api/3/search` mit `startAt` zurück.
+   Pagination bis `performance.max_results`, Timeout und Retries sind
+   konfigurierbar. ADF-Beschreibungen (API v3) werden in Text umgewandelt.
+4. **Prefix-Filter:** Task-Keys werden clientseitig gegen `filters.prefix`
    geprüft (Standard `JRA-`).
-3. **SQL-Scan:** Alle `.sql`-Dateien unter `scripts.base_path` werden genau
-   einmal gefunden und über den Namen ihres Elternverzeichnisses indexiert.
-4. **Matching:** Für jeden Jira-Task werden die SQL-Dateien aus seinem
-   Task-Verzeichnis gesucht.
 5. **Export:** Ein Excel-Bericht pro Task direkt im Task-Verzeichnis.
 
-Ohne gültige Jira-Konfiguration läuft das Tool trotzdem durch und erzeugt
-einen leeren Fallback-Bericht mit Hinweiszeile.
+Ohne gültige Jira-Konfiguration läuft `--mode scan` vollständig durch.
+`--mode enrich` wird übersprungen; die vorhandenen Scan-Berichte bleiben
+erhalten.
 
 ---
 
@@ -173,7 +245,7 @@ Defaults ergänzt. Umgebungsvariablen haben Vorrang:
 | `JIRA_LOG_LEVEL` | `logging.level` |
 
 Wichtige Blöcke: `server`, `api`, `project`, `scripts`, `filters`,
-`performance`, `excel`, `logging`.
+`performance`, `jira`, `storage`, `excel`, `logging`.
 
 ```yaml
 project:
@@ -183,6 +255,11 @@ filters:
 scripts:
   base_path: "/mount"      # Root der Verzeichnisstruktur
   extensions: [".sql"]
+storage:
+  scan_index: "inventory/scan_index.json"
+jira:
+  batch_size: 100             # max. 100 Keys pro Request
+  batch_delay_seconds: 1.0    # Pause zwischen Blöcken
 excel:
   output_filename: "{JIRA}.xlsx"
 ```
@@ -264,7 +341,8 @@ ruff check .
 
 Die Smoke-Tests prüfen u. a. ADF-/Datums-Parsing, Jira-Response-Verarbeitung,
 Prefix-Filter, Task-Key-Ableitung aus der Verzeichnisstruktur, SQL-Matching,
-den Excel-Export pro Task und die API-Endpunkte.
+den Excel-Export pro Task, die Scan-/Enrich-Phasen, die Batch-Grenze von
+maximal 100 Keys und die API-Endpunkte.
 
 ---
 
@@ -272,12 +350,14 @@ den Excel-Export pro Task und die API-Endpunkte.
 
 | Situation | Verhalten |
 |-----------|-----------|
-| Jira nicht konfiguriert | Warnung + leerer Fallback-Bericht |
-| Jira nicht erreichbar / 5xx | Retries, danach Warnung + leerer Fallback-Bericht |
-| 401/403 | Klare Fehlermeldung im Log, leerer Fallback-Bericht |
+| Jira nicht konfiguriert | Scan-Berichte bleiben erhalten, `enrich` wird übersprungen |
+| Jira nicht erreichbar / 5xx | Retries, danach wird der Batch übersprungen |
+| 401/403 | Klare Fehlermeldung im Log, Batch wird übersprungen |
+| Scan-Index fehlt bei `enrich` | Verzeichnisstruktur wird automatisch eingelesen |
 | Scan-Root fehlt | Warnung, keine Berichte |
 | SQL-Datei außerhalb eines Task-Verzeichnisses | Warnung, Datei wird ignoriert |
 | Task ohne SQL-Datei | Warnung, kein Bericht für diesen Task |
+| Task-Key nicht in Jira gefunden | Scan-Daten bleiben, Status `Missing` |
 | Einzelne SQL-Datei unlesbar | Warnung, restliche Dateien werden verarbeitet |
 | Excel nicht schreibbar | Fehlercode 1 + Logeintrag |
 

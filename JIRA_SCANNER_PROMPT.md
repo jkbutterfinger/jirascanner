@@ -3,7 +3,7 @@ JIRA/GIRA SCANNER - SYSTEM- UND NUTZUNGSDOKUMENTATION
 ================================================================================
 
 SYSTEMBEZEICHNUNG : Jira/Gira Scanner for SQL files with per-task Excel export
-VERSION           : 1.2.0
+VERSION           : 1.3.0
 PYTHON            : >= 3.9
 LIZENZ            : MIT
 HAUPTEINSTIEG     : main.py
@@ -20,6 +20,16 @@ Der Scanner sucht ausschließlich SQL-Dateien in einer definierten
 Verzeichnisstruktur. Die Jira-Referenz wird aus dem Verzeichnisnamen
 abgeleitet - nicht aus dem Dateiinhalt. Für jeden Jira-Task (Auftrag)
 wird ein eigener Excel-Bericht direkt im Task-Verzeichnis abgelegt.
+
+Der Ablauf ist in zwei Aufrufmodi geteilt:
+
+  1) --mode scan    Verzeichnisstruktur einlesen und Ausgabe soweit
+                    möglich erstellen (ohne Jira-Zugriff).
+  2) --mode enrich  Jira-Details im Nachgang anreichern. Die Keys werden
+                    in Blöcken von maximal 100 abgefragt, mit Pause
+                    zwischen den Blöcken.
+
+  --mode all        Beide Phasen nacheinander (Default).
 
 Erwartete Struktur:
 
@@ -51,11 +61,15 @@ Er liefert:
 
 main.py
   Kanonische Implementierung:
-  - JiraClient       : Jira REST API v3, Pagination, Retry, ADF-Parsing
-  - ScriptScanner    : SQL-Scan + Index nach Task-Verzeichnis
-  - ExcelExporter    : ein XLSX-Bericht pro Task im Task-Verzeichnis
-  - build_report()   : Zusammenführung Task <-> SQL-Dateien
-  - main()           : CLI-Einstiegspunkt
+  - JiraClient          : Jira REST API v3, Pagination, Retry, ADF-Parsing,
+                          Batch-Abfrage nach Keys (max. 100 pro Request)
+  - ScriptScanner       : SQL-Scan + Index nach Task-Verzeichnis
+  - ExcelExporter       : ein XLSX-Bericht pro Task im Task-Verzeichnis
+  - build_scan_index()  : Inventur der Verzeichnisstruktur (JSON)
+  - run_scan_phase()    : Phase 1 ohne Jira
+  - run_enrich_phase()  : Phase 2 mit Jira-Anreicherung
+  - build_report()      : Zusammenführung Task <-> SQL-Dateien
+  - main()              : CLI-Einstiegspunkt (--mode scan|enrich|all)
 
 config.py
   Gemeinsame Config-Schicht:
@@ -146,6 +160,13 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
     timeout: 30                # Sekunden pro Request
     retry_attempts: 3
 
+  storage:
+    scan_index: "inventory/scan_index.json"   # Ergebnis von --mode scan
+
+  jira:
+    batch_size: 100            # 1-100 Keys pro Request (wird begrenzt)
+    batch_delay_seconds: 1.0   # Pause zwischen zwei Blöcken
+
   excel:
     output_path: "output"                        # nur Fallback
     output_filename: "{JIRA}.xlsx"               # pro Task im Task-Ordner
@@ -175,9 +196,11 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
 
 4.3 Verhalten ohne gültige Konfiguration
 
-  Fehlt URL oder Token (oder steht noch "your-jira-server"), wird eine
-  Warnung geloggt und ein leerer Fallback-Bericht mit Hinweiszeile
-  unter excel.output_path erzeugt. Das Tool bricht nicht ab.
+  Fehlt URL oder Token (oder steht noch "your-jira-server"), läuft
+  --mode scan trotzdem vollständig durch und erzeugt die Berichte aus
+  der Verzeichnisstruktur. --mode enrich wird mit einer Warnung
+  übersprungen; die vorhandenen Scan-Berichte bleiben erhalten.
+  Das Tool bricht nicht ab.
 
 4.4 Dateiname des Excel-Berichts
 
@@ -198,13 +221,33 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
 5. NUTZUNG
 ================================================================================
 
-5.1 Berichte erzeugen
+5.1 Berichte erzeugen (zweiphasig)
 
-  python3 main.py
-  ./run.sh
-  python3 main.py --dry-run          # nur Konsole, keine Datei
-  python3 main.py --prefix JRA- -v   # DEBUG-Logging
-  python3 main.py --config other.yaml
+  Phase 1 - Verzeichnisstruktur einlesen (ohne Jira):
+    python3 main.py --mode scan
+    ./run.sh --mode scan
+
+    - erzeugt pro Task bereits <Jira-Task>.xlsx
+    - Jira-Spalten bleiben leer, Status = "Pending"
+    - schreibt inventory/scan_index.json (storage.scan_index)
+
+  Phase 2 - Jira-Details anreichern:
+    python3 main.py --mode enrich
+    python3 main.py --mode enrich --batch-size 50 --batch-delay 2
+
+    - liest den Scan-Index (fehlt er, wird Phase 1 automatisch ausgeführt)
+    - fragt nur die gefundenen Task-Keys ab
+    - maximal 100 Keys pro Request
+    - Pause zwischen den Blöcken (jira.batch_delay_seconds)
+    - Keys ohne Jira-Treffer: Scan-Daten bleiben, Status = "Missing"
+
+  Beides nacheinander (Default):
+    python3 main.py --mode all
+
+  Weitere Optionen:
+    python3 main.py --dry-run          # nur Konsole, keine Datei
+    python3 main.py --prefix JRA- -v   # DEBUG-Logging
+    python3 main.py --config other.yaml
 
   run.sh prüft Abhängigkeiten, legt output/, logs/, inventory/ und
   jira_data/ an und gibt den Exit-Code von main.py weiter.
@@ -246,11 +289,17 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
   6) HTTP 401/403 erzeugt eine klare Fehlermeldung; 5xx wird retryt.
   7) Pagination endet bei performance.max_results.
 
-6.2 Prefix-Filter
+6.2 Prefix-Filter und Key-Abfrage
 
-  Die JQL lädt das Projekt (project.key bzw. project.jql). Anschließend
-  wird jeder Task-Key clientseitig gegen filters.prefix geprüft.
-  Beispiel: Prefix "JRA-" akzeptiert "JRA-1001", nicht "OPS-1001".
+  filters.prefix (Standard "JRA-") wird clientseitig geprüft. In Phase 1
+  werden Task-Verzeichnisse außerhalb dieses Prefix ignoriert; --prefix
+  überschreibt den konfigurierten Wert. Beim projektweiten Suchpfad
+  (z. B. API /api/tasks?refresh=true) wird ebenfalls gefiltert.
+
+  Die CLI-Anreicherung fragt gezielt die aus der Verzeichnisstruktur
+  abgeleiteten Keys ab:
+    key in ("JRA-1001", "JRA-1002", ...)
+  Dadurch werden keine fremden Projekt-Tasks geladen.
 
 6.3 SQL-Scan und Task-Zuordnung
 
@@ -270,6 +319,12 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
   7) Liegt eine SQL-Datei nicht in einem Task-Verzeichnis, wird sie mit
      einer Warnung ignoriert.
   8) Kein Treffer -> File-Location = "Not found".
+  9) Phase 1 (--mode scan) schreibt die Inventur als JSON:
+       storage.scan_index (Standard: inventory/scan_index.json)
+     Sie enthält pro Task: Verzeichnis, Pfadkontext und SQL-Dateien.
+ 10) Die Excel-Berichte aus Phase 1 enthalten bereits File-Datum,
+     File-Location und Technologien; die Jira-Spalten bleiben leer
+     (Status = "Pending").
 
 6.4 Technologie-Erkennung
 
@@ -278,6 +333,21 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
   - Zusätzlich erkannt: "PL/pgSQL", "T-SQL", "MySQL", "Oracle"
     anhand typischer Schlüsselwörter.
   Ausgabe: sortierte, eindeutige Liste (max. 8 im Excel-Bericht).
+
+6.5 Jira-Anreicherung in Blöcken
+
+  1) run_enrich_phase() liest die Task-Keys aus dem Scan-Index.
+  2) JiraClient.fetch_tasks_by_keys() dedupliziert die Keys.
+  3) Abfrage in Blöcken von jira.batch_size; harter Maximalwert 100.
+     CLI: --batch-size (1-100).
+  4) Zwischen den Blöcken wird jira.batch_delay_seconds pausiert.
+     CLI: --batch-delay.
+  5) JQL pro Block: key in ("JRA-1001", "JRA-1002", ...).
+  6) Fehlgeschlagene Blöcke werden geloggt und übersprungen; die
+     übrigen Blöcke laufen weiter.
+  7) Nicht gefundene Keys bleiben mit Status "Missing" erhalten.
+  8) Anschließend werden die Excel-Berichte im Task-Verzeichnis neu
+     geschrieben.
 
 ================================================================================
 7. EXCEL-AUSGABE
@@ -291,6 +361,11 @@ werden durch Defaults ergänzt; Umgebungsvariablen haben Vorrang.
 
   Enthält ein Task-Verzeichnis mehrere SQL-Dateien, stehen sie als
   mehrere Zeilen im selben Excel-Bericht.
+
+  In Phase 1 (--mode scan) wird der Bericht bereits mit File-Datum,
+  File-Location und Technologien geschrieben; die Jira-Spalten bleiben
+  leer (Status = "Pending"). Phase 2 (--mode enrich) schreibt denselben
+  Bericht mit den Jira-Details neu.
 
   Nur wenn keine Tasks/SQL-Dateien gefunden werden, wird ein leerer
   Fallback-Bericht unter excel.output_path geschrieben:
@@ -393,12 +468,17 @@ und Detailmeldung zurückgegeben.
 9. FEHLERBEHANDLUNG UND LOGGING
 ================================================================================
 
-  Jira nicht konfiguriert            -> Warnung + leerer Fallback-Bericht
-  Jira nicht erreichbar / 5xx        -> Retries, danach Warnung + Fallback
-  HTTP 401/403                       -> Fehlermeldung, Fallback-Bericht
+  Jira nicht konfiguriert            -> Scan-Berichte bleiben, enrich wird
+                                        übersprungen
+  Jira nicht erreichbar / 5xx        -> Retries, danach wird der Batch
+                                        übersprungen
+  HTTP 401/403                       -> Fehlermeldung, Batch wird übersprungen
+  Scan-Index fehlt bei --mode enrich -> Verzeichnisstruktur wird automatisch
+                                        zuerst eingelesen
   Scan-Root fehlt                    -> Warnung, keine Berichte
   SQL außerhalb Task-Verzeichnis     -> Warnung, Datei wird ignoriert
   Task ohne SQL-Datei                -> Warnung, kein Bericht für den Task
+  Task-Key nicht in Jira gefunden    -> Scan-Daten bleiben, Status "Missing"
   Einzelne SQL-Datei unlesbar        -> Warnung, restliche Dateien laufen weiter
   Excel nicht schreibbar             -> Exit-Code 1 + Logeintrag
   Ungültige config.yaml              -> ValueError mit Pfadangabe
@@ -473,6 +553,9 @@ und Detailmeldung zurückgegeben.
   - Verhalten ohne gültige Jira-Konfiguration
   - Task-Key-Ableitung aus der Verzeichnisstruktur
   - SQL-Index und Report-Zusammenführung
+  - Scan-Index (JSON-Roundtrip)
+  - Scan- und Enrich-Phase inkl. CLI-Modi
+  - Batch-Abfrage: maximal 100 Keys pro Request und Pause dazwischen
   - Excel-Export pro Task inkl. Header und Summenzeile
   - Dateinamen-Platzhalter
   - ScriptAnalyzer (nur SQL)

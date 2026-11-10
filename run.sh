@@ -3,8 +3,9 @@
 # ---------------------------------------------------------------------------
 # Prüft Voraussetzungen, legt Ausgabeordner an und startet main.py.
 # Alle Argumente werden an main.py weitergegeben, z. B.:
-#   ./run.sh --dry-run
-#   ./run.sh --prefix CPU- --verbose
+#   ./run.sh --mode scan
+#   ./run.sh --mode enrich --batch-size 50 --batch-delay 2
+#   ./run.sh --mode all --dry-run
 # ---------------------------------------------------------------------------
 
 set -u
@@ -16,7 +17,7 @@ PYTHON="${PYTHON:-python3}"
 
 echo "=============================================="
 echo "🔍 JIRA/GIRA SCANNER"
-echo "CPU-Task-Scanner mit Excel-/CSV-Export"
+echo "SQL-Scanner: Phase 1 Verzeichnis, Phase 2 Jira-Anreicherung"
 echo "=============================================="
 echo ""
 
@@ -57,8 +58,10 @@ echo ""
 if [[ $EXIT_CODE -eq 0 ]]; then
     echo "✅ Bericht erfolgreich erzeugt."
     echo ""
-    echo "Ausgabedateien:"
-    ls -lh output/*.xlsx output/*.csv 2>/dev/null || echo "  (keine Dateien gefunden)"
+    echo "Ausgabedateien (Fallback):"
+    ls -lh output/*.xlsx output/*.csv 2>/dev/null || echo "  (keine Fallback-Dateien)"
+    echo "Task-Berichte liegen in den jeweiligen Task-Verzeichnissen."
+    echo "Scan-Index: inventory/scan_index.json"
 else
     echo "❌ Berichtserzeugung fehlgeschlagen (Exit-Code $EXIT_CODE)."
     echo "Details siehe logs/jira_scanner.log"

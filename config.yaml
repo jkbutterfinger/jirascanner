@@ -34,6 +34,7 @@ storage:
   inventory_path: "inventory"
   inventory_file: "inventory.json"
   suggestions_file: "suggestions.json"
+  scan_index: "inventory/scan_index.json"   # Ergebnis von --mode scan
   jira_cache: "jira_data/tasks.json"
 
 # Zu scannende Dateien: ausschließlich SQL
@@ -58,6 +59,13 @@ performance:
   max_results: 1000        # Obergrenze über alle Seiten
   timeout: 30              # Sekunden pro Request
   retry_attempts: 3
+
+# Jira-Anreicherung (Phase 2, --mode enrich)
+# Die Details werden in Blöcken von maximal 100 Keys abgefragt. Zwischen
+# den Blöcken wird pausiert, damit der Jira-Server nicht überlastet wird.
+jira:
+  batch_size: 100             # 1-100 Keys pro Request (wird begrenzt)
+  batch_delay_seconds: 1.0    # Pause zwischen zwei Blöcken in Sekunden
 
 # Excel-Export
 # Ein Bericht pro Auftrag wird direkt im Task-Verzeichnis abgelegt:
