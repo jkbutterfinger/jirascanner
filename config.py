@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Zentrale Konfigurationsverwaltung für den Jira/Gira Scanner.
+"""Zentrale Konfigurations- und Logging-Schicht des Jira/Gira Scanners.
 
-Alle Module (main.py, scanner/, api/, scripts/) laden ihre Konfiguration über
-diese Datei, damit Defaults, Umgebungsvariablen und Pfadauflösung überall
-identisch funktionieren.
+Alle Module laden ihre Konfiguration über diese Datei, damit Defaults,
+Umgebungsvariablen und Pfadauflösung überall identisch funktionieren.
 """
 
 from __future__ import annotations
 
 import copy
+import logging
 import os
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -18,8 +19,8 @@ import yaml
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = ROOT / "config.yaml"
 
-# Optionale .env-Unterstützung (python-dotenv ist optional).
-try:  # pragma: no cover - nur Komfort
+# Optionale .env-Unterstützung; python-dotenv ist optional.
+try:  # pragma: no cover - reiner Komfort
     from dotenv import load_dotenv
 
     load_dotenv(ROOT / ".env")
@@ -43,26 +44,17 @@ DEFAULTS: Dict[str, Any] = {
         "name": "Jira Reporting",
         "jql": "",
     },
-    "storage": {
-        "inventory_path": str(ROOT / "inventory"),
-        "inventory_file": "inventory.json",
-        "suggestions_file": "suggestions.json",
-        # Ergebnis der Verzeichnis-/SQL-Inventur für die spätere Anreicherung.
-        "scan_index": str(ROOT / "inventory" / "scan_index.json"),
-        "jira_cache": str(ROOT / "jira_data" / "tasks.json"),
-    },
-    "scripts": {
-        "base_path": str(ROOT / "scripts"),
-        # Es werden ausschließlich SQL-Dateien gescannt.
-        "extensions": [".sql"],
-        "include_subdirectories": True,
-        "exclude": [],
-    },
     "filters": {
         "prefix": "JRA-",
         "min_priority": "medium",
         "statuses": ["open", "in progress", "done"],
         "exclude_keywords": [],
+    },
+    "scripts": {
+        "base_path": str(ROOT / "scripts"),
+        "extensions": [".sql"],
+        "include_subdirectories": True,
+        "exclude": [],
     },
     "performance": {
         "max_results": 1000,
@@ -75,10 +67,15 @@ DEFAULTS: Dict[str, Any] = {
         "batch_size": 100,
         "batch_delay_seconds": 1.0,
     },
+    "storage": {
+        "inventory_path": str(ROOT / "inventory"),
+        "inventory_file": "inventory.json",
+        "suggestions_file": "suggestions.json",
+        "scan_index": str(ROOT / "inventory" / "scan_index.json"),
+        "jira_cache": str(ROOT / "jira_data" / "tasks.json"),
+    },
     "excel": {
-        # Fallback-Ordner nur für leere Berichte ohne Task-Verzeichnis.
         "output_path": str(ROOT / "output"),
-        # Ein Excel-Bericht pro Auftrag, abgelegt im Task-Verzeichnis.
         "output_filename": "{JIRA}.xlsx",
         "fallback_filename": "jira_report_{YYYY}_{MM}_{DD}.xlsx",
         "include_headers": True,
@@ -92,10 +89,16 @@ DEFAULTS: Dict[str, Any] = {
         "max_size_mb": 10,
         "backup_count": 3,
     },
+    "confluence": {
+        "enabled": False,
+        "base_url": "",
+        "api_token": "",
+        "attachments_path": str(ROOT / "jira_data" / "attachments"),
+    },
 }
 
-# Umgebungsvariablen -> Config-Pfad
-_ENV_OVERRIDES = {
+# Umgebungsvariable -> Pfad in der Konfiguration (Punktnotation).
+ENV_OVERRIDES = {
     "JIRA_URL": ("server", "url"),
     "JIRA_API_TOKEN": ("api", "token"),
     "JIRA_PROJECT_KEY": ("project", "key"),
@@ -104,74 +107,95 @@ _ENV_OVERRIDES = {
     "JIRA_LOG_LEVEL": ("logging", "level"),
 }
 
+# Pfade, die relativ zum Projektwurzelverzeichnis aufgelöst werden.
+PATH_FIELDS = (
+    ("scripts", "base_path"),
+    ("excel", "output_path"),
+    ("storage", "inventory_path"),
+    ("storage", "scan_index"),
+    ("storage", "jira_cache"),
+    ("logging", "output_file"),
+    ("confluence", "attachments_path"),
+)
+
 
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
-    """Rekursiv zwei Dicts zusammenführen (override gewinnt)."""
+    """Mischt ``override`` rekursiv über ``base`` und gibt ein neues Dict zurück."""
     result = copy.deepcopy(base)
     for key, value in (override or {}).items():
-        if (
-            key in result
-            and isinstance(result[key], dict)
-            and isinstance(value, dict)
-        ):
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
             result[key] = _deep_merge(result[key], value)
         else:
-            result[key] = copy.deepcopy(value)
+            result[key] = value
     return result
 
 
-def _apply_env(config: Dict[str, Any]) -> Dict[str, Any]:
-    for env_name, (section, key) in _ENV_OVERRIDES.items():
+def _set_nested(config: Dict[str, Any], path: tuple, value: Any) -> None:
+    current = config
+    for part in path[:-1]:
+        current = current.setdefault(part, {})
+    current[path[-1]] = value
+
+
+def _apply_env_overrides(config: Dict[str, Any]) -> Dict[str, Any]:
+    for env_name, path in ENV_OVERRIDES.items():
         value = os.environ.get(env_name)
         if value:
-            config.setdefault(section, {})[key] = value
+            _set_nested(config, path, value)
     return config
 
 
-def load_config(path: Optional[str | Path] = None) -> Dict[str, Any]:
-    """Lädt config.yaml, mischt Defaults und wendet ENV-Overrides an.
-
-    Fehlt die Datei, werden ausschließlich die Defaults verwendet. Das ist
-    wichtig, damit das Tool auch ohne gültige Jira-Konfiguration einen leeren
-    Report erzeugen kann.
-    """
-    config_path = Path(path) if path else DEFAULT_CONFIG_PATH
-    file_config: Dict[str, Any] = {}
-
-    if config_path.exists():
-        with open(config_path, "r", encoding="utf-8") as handle:
-            loaded = yaml.safe_load(handle) or {}
-            if not isinstance(loaded, dict):
-                raise ValueError(f"Ungültige Konfiguration in {config_path}")
-            file_config = loaded
-
-    return _apply_env(_deep_merge(DEFAULTS, file_config))
-
-
-def resolve_path(value: str | Path, base: Path = ROOT) -> Path:
-    """Löst relative Pfade relativ zum Projektwurzelverzeichnis auf."""
-    path = Path(value).expanduser()
+def resolve_path(value: Any, base: Optional[Path] = None) -> Path:
+    """Löst einen Pfad relativ zum Projektwurzelverzeichnis auf."""
+    path = Path(str(value)).expanduser()
     if not path.is_absolute():
-        path = base / path
-    return path.resolve()
+        path = Path(base or ROOT) / path
+    return path
 
 
-def setup_logging(config: Dict[str, Any], verbose: bool = False) -> None:
-    """Konfiguriert Console- und Datei-Logging (idempotent)."""
-    import logging
-    from logging.handlers import RotatingFileHandler
+def _resolve_config_paths(config: Dict[str, Any]) -> Dict[str, Any]:
+    for section, key in PATH_FIELDS:
+        section_data = config.get(section)
+        if isinstance(section_data, dict) and section_data.get(key):
+            section_data[key] = str(resolve_path(section_data[key]))
+    return config
 
-    level_name = "DEBUG" if verbose else str(config.get("logging", {}).get("level", "INFO"))
-    level = getattr(logging, level_name.upper(), logging.INFO)
 
-    root = logging.getLogger("jira_scanner")
-    root.setLevel(level)
-    root.propagate = False
+def load_config(path: Optional[str] = None) -> Dict[str, Any]:
+    """Lädt config.yaml, ergänzt Defaults und wendet Umgebungsvariablen an."""
+    config_path = Path(path).expanduser() if path else DEFAULT_CONFIG_PATH
+    file_data: Dict[str, Any] = {}
+    if config_path.exists():
+        try:
+            loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError) as exc:
+            raise ValueError(
+                f"Konfiguration konnte nicht gelesen werden ({config_path}): {exc}"
+            ) from exc
+        if loaded is not None and not isinstance(loaded, dict):
+            raise ValueError(f"Ungültige config.yaml (Dict erwartet): {config_path}")
+        file_data = loaded or {}
 
-    if root.handlers:
-        for handler in root.handlers:
-            handler.setLevel(level)
-        return
+    config = _deep_merge(DEFAULTS, file_data)
+    config = _apply_env_overrides(config)
+    config = _resolve_config_paths(config)
+    config["_config_path"] = str(config_path)
+    return config
+
+
+def setup_logging(config: Dict[str, Any], verbose: bool = False) -> logging.Logger:
+    """Richtet Console- und Datei-Logging ein (idempotent)."""
+    log_cfg = config.get("logging", {})
+    level_name = "DEBUG" if verbose else str(log_cfg.get("level", "INFO")).upper()
+    level = getattr(logging, level_name, logging.INFO)
+
+    logger = logging.getLogger("jira_scanner")
+    logger.setLevel(level)
+    logger.propagate = False
+
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
 
     formatter = logging.Formatter(
         "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
@@ -181,21 +205,20 @@ def setup_logging(config: Dict[str, Any], verbose: bool = False) -> None:
     console = logging.StreamHandler()
     console.setLevel(level)
     console.setFormatter(formatter)
-    root.addHandler(console)
+    logger.addHandler(console)
 
-    log_cfg = config.get("logging", {})
-    log_file = resolve_path(log_cfg.get("output_file", DEFAULTS["logging"]["output_file"]))
-    try:
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-        max_bytes = int(log_cfg.get("max_size_mb", 10)) * 1024 * 1024
+    output_file = log_cfg.get("output_file")
+    if output_file:
+        log_path = resolve_path(output_file)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         file_handler = RotatingFileHandler(
-            log_file,
-            maxBytes=max_bytes,
-            backupCount=int(log_cfg.get("backup_count", 3)),
+            log_path,
+            maxBytes=max(1, int(log_cfg.get("max_size_mb", 10))) * 1024 * 1024,
+            backupCount=max(0, int(log_cfg.get("backup_count", 3))),
             encoding="utf-8",
         )
         file_handler.setLevel(level)
         file_handler.setFormatter(formatter)
-        root.addHandler(file_handler)
-    except OSError:
-        root.warning("Logdatei %s konnte nicht geöffnet werden", log_file)
+        logger.addHandler(file_handler)
+
+    return logger

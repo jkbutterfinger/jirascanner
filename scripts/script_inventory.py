@@ -1,287 +1,246 @@
 #!/usr/bin/env python3
-"""Script Inventory Scanner – analysiert Reporting-Skripte.
+"""SQL-Inventar für den Jira/Gira Scanner.
 
-Das Modul wird von der API (``/api/scripts``) und als eigenständiges CLI
-verwendet. Es liest Skripte, erkennt Jira-Referenzen, Technologien,
-Datenbankzugriffe und KPI-/Dashboard-Begriffe.
+Der Analyzer liest ausschließlich ``.sql``-Dateien, leitet den Jira-Task-Key
+aus der Verzeichnisstruktur ab und sammelt lokale Metadaten (Technologien,
+Tabellen, KPI-Begriffe, Komplexität). Zusätzlich stehen ein einfacher
+Task-Mapper und ein Report-Generator für JSON/Markdown bereit.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-# Direktaufruf "python scripts/script_inventory.py" ermöglichen.
-_ROOT = Path(__file__).resolve().parents[1]
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
+from config import load_config, resolve_path, setup_logging
+from main import derive_path_context, task_key_from_directory
 
-from config import ROOT, load_config, resolve_path  # noqa: E402
+LOGGER = logging.getLogger("jira_scanner")
 
-DEFAULT_EXTENSIONS = [".sql"]
-
-# Jira-Key-Muster, z. B. JRA-1001 (wird auf den Verzeichnisnamen angewendet).
-TASK_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
-
-IMPORT_PATTERNS = [
-    re.compile(r"^\s*import\s+([A-Za-z_][\w.]*)", re.MULTILINE),
-    re.compile(r"^\s*from\s+([A-Za-z_][\w.]*)\s+import\b", re.MULTILINE),
-    re.compile(r"""require\(\s*["']([^"']+)["']\s*\)"""),
-]
-
-DB_PATTERNS = [
-    r"(?:mysql|postgres(?:ql)?|sqlite|oracle|mssql)://[^\s\"']+",
-    r"DATABASE_URL\s*=\s*[\"']([^\"']+)[\"']",
-    r"(?:DB|DATABASE)_[A-Z_]+\s*=\s*[\"']([^\"']+)[\"']",
-]
-
-API_PATTERNS = [
-    r"\brequests\.(?:get|post|put|patch|delete)\s*\(",
-    r"\bhttpx\.(?:get|post|put|patch|delete)\s*\(",
-    r"\burllib\.request\b",
-    r"\bfetch\s*\(",
-    r"\baxios\.(?:get|post|put|patch|delete)\s*\(",
-]
-
-KPI_PATTERNS = [
-    r"\bkpi[_:]?\s*([^\s,:\n]+)",
-    r"\bdashboard[_:]?\s*([^\s,:\n]+)",
-    r"\bmetric[_:]?\s*([^\s,:\n]+)",
-    r"\breport[_:]?\s*([^\s,:\n]+)",
-]
+TABLE_PATTERN = re.compile(
+    r"\b(?:FROM|JOIN|INTO|UPDATE|DELETE\s+FROM)\s+([A-Za-z_][\w.$]*)",
+    re.IGNORECASE,
+)
+API_PATTERN = re.compile(
+    r"\b(?:UTL_HTTP|DBMS_CLOUD|APEX_WEB_SERVICE|HTTP\.?GET|HTTP\.?POST)\b",
+    re.IGNORECASE,
+)
+KPI_PATTERN = re.compile(
+    r"\b(?:kpi|dashboard|report|auswertung|umsatz|gewinn|marge|bestand|"
+    r"kunde|lieferant|monat|jahr)\w*",
+    re.IGNORECASE,
+)
 
 
 class ScriptAnalyzer:
-    """Analysiert Reporting-Skripte und extrahiert Metadaten."""
+    """Analysiert SQL-Dateien und liefert ein serialisierbares Inventar."""
 
-    def __init__(
-        self,
-        extensions: Optional[List[str]] = None,
-        exclude: Optional[List[str]] = None,
-    ):
-        self.extensions = extensions or list(DEFAULT_EXTENSIONS)
-        self.exclude = set(exclude or [])
-        self.jira_ref_pattern = re.compile(r"\b([A-Z][A-Z0-9]+-\d+)\b")
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        self.config = config or load_config()
+        scripts = self.config.get("scripts", {})
+        self.base_path = resolve_path(scripts.get("base_path", "scripts"))
+        self.extensions = [
+            str(ext).lower()
+            for ext in (scripts.get("extensions") or [".sql"])
+            if str(ext).strip()
+        ]
+        self.include_subdirectories = bool(scripts.get("include_subdirectories", True))
+        self.exclude = [str(item) for item in (scripts.get("exclude") or [])]
 
-    def scan_directory(self, path: str | Path) -> List[Dict[str, Any]]:
-        """Scannt ein Verzeichnis rekursiv."""
-        scripts_path = Path(path)
-        if not scripts_path.exists():
+    @staticmethod
+    def _detect_technologies(content: str, suffix: str = ".sql") -> List[str]:
+        if suffix.lower() != ".sql":
+            return []
+        upper = content.upper()
+        technologies = {"SQL"}
+        if "PL/PGSQL" in upper or "LANGUAGE PLPGSQL" in upper:
+            technologies.add("PL/pgSQL")
+        if "NVARCHAR" in upper or "\nGO\n" in upper or "IDENTITY(" in upper:
+            technologies.add("T-SQL")
+        if "AUTO_INCREMENT" in upper or "ENGINE=INNODB" in upper:
+            technologies.add("MySQL")
+        if "ROWNUM" in upper or "CONNECT BY" in upper or "NVL(" in upper:
+            technologies.add("Oracle")
+        return sorted(technologies)
+
+    @staticmethod
+    def _complexity(lines: int) -> str:
+        if lines < 50:
+            return "low"
+        if lines < 200:
+            return "medium"
+        return "high"
+
+    def find_scripts(self, path: Optional[Path] = None) -> List[Path]:
+        """Findet alle passenden SQL-Dateien unterhalb von ``path``."""
+        root = Path(path) if path else self.base_path
+        if not root.exists():
+            LOGGER.warning("Scan-Pfad nicht gefunden: %s", root)
             return []
 
-        results: List[Dict[str, Any]] = []
-        for file_path in sorted(scripts_path.rglob("*")):
-            if not file_path.is_file():
-                continue
-            if file_path.suffix not in self.extensions:
-                continue
-            if file_path.name in self.exclude:
-                continue
-            results.append(self.analyze_file(file_path))
-        return results
+        found: List[Path] = []
+        seen: set = set()
+        for extension in self.extensions:
+            iterator = (
+                root.rglob(f"*{extension}")
+                if self.include_subdirectories
+                else root.glob(f"*{extension}")
+            )
+            for script in iterator:
+                if not script.is_file() or script in seen:
+                    continue
+                relative = script.relative_to(root).as_posix()
+                if script.name in self.exclude or relative in self.exclude:
+                    continue
+                seen.add(script)
+                found.append(script)
+        return sorted(found)
 
-    def analyze_file(self, file_path: Path) -> Dict[str, Any]:
-        """Analysiert eine einzelne SQL-Datei.
-
-        Die Jira-Referenz wird aus dem Elternverzeichnis abgeleitet:
-        ``.../<Jahr>/<Abteilung>/<Auftraggeber>/<Jira-Task>/<name>.sql``.
-        """
-        task_key = file_path.parent.name.strip().upper()
-        if not TASK_KEY_PATTERN.match(task_key):
-            task_key = ""
-
-        analysis: Dict[str, Any] = {
-            "path": str(file_path),
-            "name": file_path.name,
+    def analyze(self, script_path: Path) -> Dict[str, Any]:
+        """Analysiert eine einzelne SQL-Datei."""
+        script_path = Path(script_path)
+        task_key = task_key_from_directory(script_path.parent)
+        info: Dict[str, Any] = {
+            "path": str(script_path),
+            "name": script_path.name,
+            "task_key": task_key,
+            "jira_refs": [task_key] if task_key else [],
+            "path_context": derive_path_context(script_path.parent),
             "size_bytes": 0,
             "lines": 0,
             "modified_date": "",
-            "task_key": task_key,
-            "task_dir": str(file_path.parent),
-            "jira_refs": [task_key] if task_key else [],
             "technologies": [],
-            "kpi_tags": [],
             "db_access": [],
             "api_calls": [],
-            "complexity": 1,
+            "kpi_reports": [],
+            "complexity": "low",
             "error": "",
         }
 
         try:
-            stat = file_path.stat()
-            analysis["size_bytes"] = stat.st_size
-            analysis["modified_date"] = datetime.fromtimestamp(stat.st_mtime).strftime(
-                "%Y-%m-%d %H:%M:%S"
-            )
-            content = file_path.read_text(encoding="utf-8", errors="replace")
+            stat = script_path.stat()
+            content = script_path.read_text(encoding="utf-8", errors="ignore")
         except OSError as exc:
-            analysis["error"] = str(exc)
-            return analysis
+            info["error"] = str(exc)
+            return info
 
-        analysis["lines"] = len(content.splitlines())
-        analysis["technologies"] = self._detect_technologies(
-            content, file_path.suffix
+        info["size_bytes"] = stat.st_size
+        info["lines"] = len(content.splitlines())
+        info["modified_date"] = datetime.fromtimestamp(stat.st_mtime).strftime(
+            "%Y-%m-%d %H:%M:%S"
         )
-        analysis["kpi_tags"] = sorted(
-            {
-                match.strip().lower()
-                for pattern in KPI_PATTERNS
-                for match in re.findall(pattern, content, re.IGNORECASE)
-                if match.strip()
-            }
+        info["technologies"] = self._detect_technologies(content, script_path.suffix)
+        info["db_access"] = sorted(
+            {match.upper() for match in TABLE_PATTERN.findall(content)}
         )
-        analysis["db_access"] = self._collect(DB_PATTERNS, content)
-        analysis["api_calls"] = self._collect(API_PATTERNS, content)
-        analysis["complexity"] = self.estimate_complexity(content)
-        return analysis
+        info["api_calls"] = sorted(
+            {match.upper() for match in API_PATTERN.findall(content)}
+        )
+        info["kpi_reports"] = sorted(
+            {match.lower() for match in KPI_PATTERN.findall(content)}
+        )
+        info["complexity"] = self._complexity(info["lines"])
+        return info
 
-    @staticmethod
-    def _collect(patterns: List[str], content: str) -> List[str]:
-        matches: List[str] = []
-        for pattern in patterns:
-            try:
-                matches.extend(re.findall(pattern, content, re.IGNORECASE))
-            except re.error:
-                continue
-        return sorted({match for match in matches if match})
-
-    @staticmethod
-    def _detect_technologies(content: str, suffix: str = ".sql") -> List[str]:
-        """Erkennt Technologien. Für SQL-Dateien inkl. grober Dialekt-Hinweise."""
-        if suffix.lower() == ".sql":
-            technologies = {"SQL"}
-            upper = content.upper()
-            if "PL/PGSQL" in upper or "LANGUAGE PLPGSQL" in upper:
-                technologies.add("PL/pgSQL")
-            if "NVARCHAR" in upper or "\nGO\n" in upper:
-                technologies.add("T-SQL")
-            if "AUTO_INCREMENT" in upper or "ENGINE=" in upper:
-                technologies.add("MySQL")
-            if "VARCHAR2" in upper or "ROWNUM" in upper:
-                technologies.add("Oracle")
-            return sorted(technologies)
-
-        names: set[str] = set()
-        for pattern in IMPORT_PATTERNS:
-            for match in pattern.findall(content):
-                root = match.split(".")[0].strip()
-                if root and not root.startswith((".", "/")):
-                    names.add(root)
-        stdlib = getattr(sys, "stdlib_module_names", frozenset())
-        builtin = set(sys.builtin_module_names)
-        return sorted(name for name in names if name not in stdlib and name not in builtin)
-
-    @staticmethod
-    def estimate_complexity(code: str) -> int:
-        """Grobe Komplexitätsschätzung zwischen 1 und 5."""
-        lines = len(code.splitlines())
-        imports = len(re.findall(r"^\s*(?:import|from)\s+\w+", code, re.MULTILINE))
-        classes = len(re.findall(r"\bclass\s+\w+", code))
-        functions = len(re.findall(r"\bdef\s+\w+\s*\(", code))
-        score = lines // 50 + imports // 10 + classes + functions // 10
-        return min(5, max(1, score))
-
-
-class JiraMapper:
-    """Mapping zwischen Jira-Tasks und Implementierungen."""
-
-    def __init__(self):
-        self.tasks: List[Dict[str, Any]] = []
-        self.implementations: List[Dict[str, Any]] = []
-
-    def load_jira_tasks(self, tasks_data: List[Dict[str, Any]]) -> None:
-        self.tasks = tasks_data
-
-    def load_implementations(self, implementations: List[Dict[str, Any]]) -> None:
-        self.implementations = implementations
-
-    def map_requirements(self) -> List[Dict[str, Any]]:
+    def analyze_directory(self, path: Optional[Path] = None) -> List[Dict[str, Any]]:
+        """Analysiert alle SQL-Dateien eines Verzeichnisses."""
         results: List[Dict[str, Any]] = []
-        for task in self.tasks:
-            key = str(task.get("key", ""))
-            matching = [
-                implementation
-                for implementation in self.implementations
-                if key and key in implementation.get("jira_refs", [])
-            ]
-            results.append(
-                {
-                    "task": key,
-                    "summary": task.get("summary", ""),
-                    "status": task.get("status", ""),
-                    "implementation_count": len(matching),
-                    "fully_implemented": bool(matching),
-                }
-            )
+        for script in self.find_scripts(path):
+            info = self.analyze(script)
+            if info.get("error"):
+                LOGGER.warning(
+                    "SQL-Datei konnte nicht gelesen werden (%s): %s",
+                    script,
+                    info["error"],
+                )
+            results.append(info)
         return results
 
 
+class JiraMapper:
+    """Ordnet SQL-Inventar-Einträge den Jira-Tasks zu."""
+
+    @staticmethod
+    def map(
+        scripts: List[Dict[str, Any]],
+        tasks: Optional[List[Any]] = None,
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        task_keys: List[str] = []
+        for task in tasks or []:
+            if isinstance(task, dict):
+                key = str(task.get("key", ""))
+            else:
+                key = str(getattr(task, "key", ""))
+            if key:
+                task_keys.append(key.upper())
+
+        mapping: Dict[str, List[Dict[str, Any]]] = {}
+        for script in scripts:
+            refs = [str(ref).upper() for ref in script.get("jira_refs", [])]
+            for reference in refs:
+                if task_keys and reference not in task_keys:
+                    continue
+                mapping.setdefault(reference, []).append(script)
+        return mapping
+
+
 class ReportGenerator:
-    """Erzeugt Zusammenfassungen und Gap-Reports."""
+    """Erzeugt JSON- und Markdown-Reports aus dem SQL-Inventar."""
 
     @staticmethod
-    def generate_summary(
-        inventory: List[Dict[str, Any]], jira_tasks: List[Dict[str, Any]]
-    ) -> Dict[str, Any]:
-        return {
-            "total_scripts": len(inventory),
-            "total_tasks": len(jira_tasks),
-            "scripts_with_jira_refs": sum(
-                1 for script in inventory if script.get("jira_refs")
-            ),
-            "scripts_with_errors": sum(1 for script in inventory if script.get("error")),
-            "date": datetime.now().isoformat(timespec="seconds"),
-        }
+    def to_json(scripts: List[Dict[str, Any]]) -> str:
+        return json.dumps(scripts, indent=2, ensure_ascii=False)
 
     @staticmethod
-    def generate_gap_report(mapping: List[Dict[str, Any]]) -> str:
-        gaps = [item for item in mapping if not item.get("fully_implemented")]
-        lines = ["# Gap Report", "", f"## Total Gaps: {len(gaps)}", ""]
-        for gap in gaps:
-            lines.extend(
-                [
-                    f"### {gap.get('task', '')} - {gap.get('summary', '')}",
-                    f"*Status*: {gap.get('status', '')}",
-                    f"*Implementation Count*: {gap.get('implementation_count', 0)}",
-                    "",
-                ]
+    def to_markdown(scripts: List[Dict[str, Any]]) -> str:
+        lines = [
+            "# SQL-Inventar",
+            "",
+            f"Generiert: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Dateien: {len(scripts)}",
+            "",
+            "| Datei | Task | Zeilen | Technologien | Komplexität |",
+            "|-------|------|-------:|--------------|-------------|",
+        ]
+        for script in scripts:
+            lines.append(
+                "| {name} | {task} | {lines} | {tech} | {complexity} |".format(
+                    name=script.get("name", ""),
+                    task=script.get("task_key", "") or "–",
+                    lines=script.get("lines", 0),
+                    tech=", ".join(script.get("technologies", [])) or "–",
+                    complexity=script.get("complexity", ""),
+                )
             )
-        return "\n".join(lines)
+        return "\n".join(lines) + "\n"
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Script-Inventar scannen")
+    """CLI für das SQL-Inventar."""
+    parser = argparse.ArgumentParser(description="SQL-Inventar des Jira/Gira Scanners")
+    parser.add_argument("--config", help="Pfad zur config.yaml")
     parser.add_argument("--path", help="Zu scannendes Verzeichnis")
     parser.add_argument("--json", action="store_true", help="JSON ausgeben")
+    parser.add_argument("-v", "--verbose", action="store_true", help="DEBUG-Logging")
     args = parser.parse_args(argv)
 
-    config = load_config()
-    scripts_cfg = config.get("scripts", {})
-    path = resolve_path(args.path or scripts_cfg.get("base_path", ROOT / "scripts"))
-
-    analyzer = ScriptAnalyzer(
-        extensions=scripts_cfg.get("extensions"),
-        exclude=scripts_cfg.get("exclude"),
-    )
-    inventory = analyzer.scan_directory(path)
-    summary = ReportGenerator.generate_summary(inventory, [])
+    config = load_config(args.config)
+    setup_logging(config, verbose=args.verbose)
+    analyzer = ScriptAnalyzer(config)
+    scripts = analyzer.analyze_directory(Path(args.path) if args.path else None)
 
     if args.json:
-        print(json.dumps({"summary": summary, "scripts": inventory}, indent=2))
+        print(ReportGenerator.to_json(scripts))
     else:
-        print(json.dumps(summary, indent=2))
-        for script in inventory:
-            print(
-                f"- {script['name']}: {script['lines']} Zeilen, "
-                f"Jira-Refs: {', '.join(script['jira_refs']) or '-'}"
-            )
+        print(ReportGenerator.to_markdown(scripts))
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())

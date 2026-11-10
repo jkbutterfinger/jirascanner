@@ -241,8 +241,17 @@ def test_script_analyzer_only_sql_and_directory_reference(tmp_path: Path) -> Non
     _write_file(task_dir, "demo.sql", "SELECT 1;\n-- KPI: umsatz\n")
     _write_file(task_dir, "demo.py", "import pandas\n# JRA-9999\n")
 
-    analyzer = ScriptAnalyzer(extensions=[".sql"], exclude=[])
-    inventory = analyzer.scan_directory(mount)
+    analyzer = ScriptAnalyzer(
+        {
+            "scripts": {
+                "base_path": str(mount),
+                "extensions": [".sql"],
+                "include_subdirectories": True,
+                "exclude": [],
+            }
+        }
+    )
+    inventory = analyzer.analyze_directory(mount)
     assert len(inventory) == 1
     assert inventory[0]["name"] == "demo.sql"
     assert inventory[0]["jira_refs"] == ["JRA-2002"]
@@ -477,6 +486,10 @@ def test_enrich_without_jira_keeps_scan_report(tmp_path: Path) -> None:
 def test_api_endpoints(tmp_path: Path) -> None:
     import api.suggestion_api as api_module
 
+    mount = tmp_path / "mount"
+    task_dir = mount / "2024" / "IT" / "ACME" / "JRA-1001"
+    script = _write_file(task_dir, "report.sql", "SELECT * FROM sales;\n")
+
     api_module.store = api_module.SuggestionStore(tmp_path / "suggestions.json")
     client = TestClient(api_module.app)
 
@@ -500,9 +513,24 @@ def test_api_endpoints(tmp_path: Path) -> None:
     assert listed.status_code == 200
     assert listed.json()["count"] == 1
 
-    gaps = client.get("/api/gaps", params={"task_keys": "JRA-1001"})
-    assert gaps.status_code == 200
-    assert gaps.json()["count"] == 1
+    with patch.object(api_module, "_script_path", return_value=mount):
+        scripts = client.get("/api/scripts")
+        assert scripts.status_code == 200
+        assert scripts.json()["count"] == 1
+        assert scripts.json()["scripts"][0]["task_key"] == "JRA-1001"
+
+        analysis = client.post("/api/scripts/analyze", params={"path": str(script)})
+        assert analysis.status_code == 200
+        assert analysis.json()["script"]["jira_refs"] == ["JRA-1001"]
+
+        gaps = client.get("/api/gaps", params={"task_keys": "JRA-1001"})
+        assert gaps.status_code == 200
+        assert gaps.json()["count"] == 1
+        assert gaps.json()["gaps"][0]["has_implementation"] is True
+
+        match = client.get("/api/match", params={"task_key": "JRA-1001"})
+        assert match.status_code == 200
+        assert match.json()["match_score"] == 1.0
 
     root = client.get("/")
     assert root.status_code == 200

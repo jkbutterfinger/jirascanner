@@ -20,9 +20,6 @@ Für jeden Jira-Task wird ein Excel-Bericht direkt im Task-Verzeichnis
 abgelegt::
 
     <base_path>/<Jahr>/<Abteilung>/<Auftraggeber>/<Jira-Task>/<Jira-Task>.xlsx
-
-Die kanonische Implementierung liegt in dieser Datei. Der historische
-Einstiegspunkt ``scanner/main_scanner.py`` delegiert nur noch hierher.
 """
 
 from __future__ import annotations
@@ -38,18 +35,33 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import requests
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from config import ROOT, load_config, resolve_path, setup_logging
+from config import load_config, resolve_path, setup_logging
 
 LOGGER = logging.getLogger("jira_scanner")
 
+TASK_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
+DEFAULT_FIELDS = [
+    "summary",
+    "status",
+    "priority",
+    "reporter",
+    "assignee",
+    "created",
+    "resolutiondate",
+    "issuetype",
+    "description",
+    "labels",
+]
+
 # Spalten des Excel-Berichts: (Anzeigename, Breite, Umbruch)
-COLUMNS: List[tuple[str, int, bool]] = [
+COLUMNS: List[Tuple[str, int, bool]] = [
     ("Jira-Nummer", 18, False),
     ("Jira-Auftraggeber", 24, False),
     ("Entwickler", 24, False),
@@ -60,7 +72,6 @@ COLUMNS: List[tuple[str, int, bool]] = [
     ("Verwendete-Technologien", 45, True),
     ("Status", 14, False),
     ("Priorität", 12, False),
-    # Lokale Spalten aus der Verzeichnisstruktur (auch im Scan-Modus gefüllt)
     ("Jahr", 8, False),
     ("Abteilung", 20, False),
 ]
@@ -84,71 +95,80 @@ STATUS_FILLS = {
     "closed": "E8F5E9",
     "resolved": "E8F5E9",
     "missing": "FCE4EC",
+    "pending": "FFFDE7",
 }
 
-JIRA_FIELDS = [
-    "summary",
-    "status",
-    "priority",
-    "reporter",
-    "assignee",
-    "created",
-    "resolutiondate",
-    "issuetype",
-    "description",
-    "labels",
-]
 
-# Jira-Key-Muster, z. B. JRA-1001. Wird auf den Verzeichnisnamen angewendet.
-TASK_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
-
-
-class JiraError(RuntimeError):
-    """Fehler bei der Kommunikation mit der Jira-API."""
-
-
-def adf_to_text(node: Any) -> str:
-    """Wandelt Jira-ADF (API v3) rekursiv in lesbaren Text um."""
+# ---------------------------------------------------------------------------
+# Allgemeine Helfer
+# ---------------------------------------------------------------------------
+def _adf_collect(node: Any, parts: List[str]) -> None:
     if node is None:
-        return ""
+        return
     if isinstance(node, str):
-        return node
+        parts.append(node)
+        return
     if isinstance(node, list):
-        return "".join(adf_to_text(item) for item in node)
-    if isinstance(node, dict):
-        node_type = node.get("type")
-        if node_type == "text":
-            return str(node.get("text", ""))
-        if node_type == "hardBreak":
-            return "\n"
-        text = adf_to_text(node.get("content", []))
-        if node_type in {"paragraph", "heading", "listItem", "tableRow", "codeBlock"}:
-            text += "\n"
-        return text
-    return str(node)
+        for item in node:
+            _adf_collect(item, parts)
+        return
+    if not isinstance(node, dict):
+        return
+
+    node_type = node.get("type")
+    if node_type == "text":
+        parts.append(str(node.get("text", "")))
+        return
+    if node_type == "hardBreak":
+        parts.append("\n")
+        return
+    if node_type in ("paragraph", "heading", "listItem", "blockquote", "codeBlock"):
+        if parts and not parts[-1].endswith("\n"):
+            parts.append("\n")
+    _adf_collect(node.get("content"), parts)
+    if node_type in ("paragraph", "heading", "listItem", "blockquote", "codeBlock"):
+        parts.append("\n")
 
 
-def format_datetime(value: Any, fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
-    """Formatiert ISO-8601-Strings aus Jira; lässt Unbekanntes unverändert.
+def adf_to_text(value: Any) -> str:
+    """Wandelt Atlassian Document Format (ADF) rekursiv in Text um."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    parts: List[str] = []
+    _adf_collect(value, parts)
+    text = "".join(parts)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
-    Jira liefert Offsets teils als ``+0000`` (ohne Doppelpunkt). Python 3.10
-    akzeptiert das in ``datetime.fromisoformat`` noch nicht, daher wird das
-    Offset vor dem Parsen normalisiert.
-    """
-    if value in (None, ""):
+
+def format_datetime(value: Any, fmt: Optional[str] = None) -> str:
+    """Formatiert ISO-/Jira-Zeitstempel; gibt bei Fehlern den Rohwert zurück."""
+    if value is None:
         return ""
     if isinstance(value, datetime):
-        return value.strftime(fmt)
-    text = str(value).strip()
-    if not text:
-        return ""
-    normalized = text.replace("Z", "+00:00")
-    normalized = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", normalized)
-    try:
-        parsed = datetime.fromisoformat(normalized)
-        return parsed.strftime(fmt)
-    except ValueError:
-        return text
+        parsed = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return ""
+        normalized = text.replace("Z", "+00:00")
+        normalized = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", normalized)
+        parsed = None
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y/%m/%d"):
+                try:
+                    parsed = datetime.strptime(text, pattern)
+                    break
+                except ValueError:
+                    continue
+            if parsed is None:
+                return text
+    return parsed.strftime(fmt or "%Y-%m-%d %H:%M:%S")
 
 
 def format_date(value: Any) -> str:
@@ -157,12 +177,8 @@ def format_date(value: Any) -> str:
 
 
 def task_key_from_directory(directory: Path) -> str:
-    """Leitet den Jira-Key aus dem Verzeichnisnamen ab.
-
-    Beispiel: ``.../JRA-1001/script.sql`` -> ``JRA-1001``.
-    Gibt einen leeren String zurück, wenn der Name kein Jira-Key ist.
-    """
-    candidate = directory.name.strip().upper()
+    """Leitet den Jira-Key aus dem Verzeichnisnamen ab."""
+    candidate = Path(directory).name.strip().upper()
     return candidate if TASK_KEY_PATTERN.match(candidate) else ""
 
 
@@ -172,22 +188,16 @@ def derive_path_context(task_directory: Path) -> Dict[str, str]:
     Erwartet ``<Jahr>/<Abteilung>/<Auftraggeber>/<Jira-Task>``. Fehlende
     Ebenen werden als leerer String zurückgegeben.
     """
-    parents = list(task_directory.parents)
+    parents = list(Path(task_directory).parents)
     return {
-        "CUSTOMER": task_directory.parent.name if len(parents) >= 1 else "",
+        "CUSTOMER": Path(task_directory).parent.name if parents else "",
         "DEPARTMENT": parents[1].name if len(parents) >= 2 else "",
         "YEAR": parents[2].name if len(parents) >= 3 else "",
     }
 
 
 def local_path_columns(match: Dict[str, Any]) -> Dict[str, str]:
-    """Liefert Jahr und Abteilung aus dem Dateipfad.
-
-    Diese Werte stammen ausschließlich aus der Verzeichnisstruktur und
-    werden deshalb bereits im Scan-Modus (ohne Jira) gefüllt. Nur wenn der
-    Pfad der erwarteten Struktur entspricht (Jahr = vier Ziffern), werden
-    die Spalten befüllt.
-    """
+    """Liefert Jahr und Abteilung aus dem Dateipfad (lokale Spalten)."""
     path = str(match.get("path", "") or "")
     if not path:
         return {"Jahr": "", "Abteilung": ""}
@@ -197,9 +207,20 @@ def local_path_columns(match: Dict[str, Any]) -> Dict[str, str]:
     return {"Jahr": context["YEAR"], "Abteilung": context["DEPARTMENT"]}
 
 
+# ---------------------------------------------------------------------------
+# Jira
+# ---------------------------------------------------------------------------
+class JiraError(RuntimeError):
+    """Fehler beim Zugriff auf die Jira-REST-API."""
+
+    def __init__(self, message: str, status: Optional[int] = None):
+        super().__init__(message)
+        self.status = status
+
+
 @dataclass
 class JiraIssue:
-    """Jira Issue/Task Model."""
+    """Jira Issue/Task-Modell."""
 
     key: str = ""
     issue_type: str = "Task"
@@ -213,98 +234,137 @@ class JiraIssue:
     resolved: str = ""
     labels: List[str] = field(default_factory=list)
 
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "key": self.key,
+            "issue_type": self.issue_type,
+            "status": self.status,
+            "priority": self.priority,
+            "summary": self.summary,
+            "description": self.description,
+            "reporter": self.reporter,
+            "assignee": self.assignee,
+            "created": self.created,
+            "resolved": self.resolved,
+            "labels": list(self.labels),
+        }
+
 
 class JiraClient:
-    """Jira/Gira REST-API-Client (API v3)."""
+    """Kleiner Jira-REST-API-v3-Client mit Retry, Pagination und Batch-Abfrage."""
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config or load_config()
         server = self.config.get("server", {})
         api = self.config.get("api", {})
-        project = self.config.get("project", {})
         performance = self.config.get("performance", {})
+        jira_cfg = self.config.get("jira", {})
 
-        self.url = str(server.get("url", "")).rstrip("/")
+        raw_url = str(server.get("url", "") or "").strip().rstrip("/")
+        if raw_url and not raw_url.startswith(("http://", "https://")):
+            protocol = str(server.get("protocol", "https") or "https")
+            raw_url = f"{protocol}://{raw_url}"
+        if raw_url:
+            parsed = urlparse(raw_url)
+            port = int(server.get("port", 443) or 0)
+            if parsed.port is None and port and port not in (80, 443):
+                raw_url = f"{raw_url}:{port}"
+
+        self.base_url = raw_url
         self.token = str(api.get("token", "") or "")
-        self.project_key = str(project.get("key", "JRA") or "JRA")
-        self.custom_jql = str(project.get("jql", "") or "")
+        self.auth_type = str(api.get("auth_type", "token") or "token")
+        self.verify_ssl = bool(server.get("verify_ssl", True))
         self.timeout = max(1, int(performance.get("timeout", 30)))
         self.retry_attempts = max(1, int(performance.get("retry_attempts", 3)))
         self.max_results = max(1, int(performance.get("max_results", 1000)))
 
-        jira_cfg = self.config.get("jira", {})
         # Maximal 100 Keys pro Request, damit der Jira-Server geschont wird.
         self.batch_size = max(1, min(100, int(jira_cfg.get("batch_size", 100))))
-        self.batch_delay = max(
-            0.0, float(jira_cfg.get("batch_delay_seconds", 1.0))
-        )
+        self.batch_delay = max(0.0, float(jira_cfg.get("batch_delay_seconds", 1.0)))
 
-        self.session = requests.Session()
-        self.session.headers.update({"Accept": "application/json"})
-        if self.token:
-            self.session.headers["Authorization"] = f"Bearer {self.token}"
-
-    # ------------------------------------------------------------------ HTTP
     def is_configured(self) -> bool:
-        """True, wenn URL und Token gesetzt und keine Platzhalter sind."""
-        if not self.url or "your-jira-server" in self.url:
+        """Prüft, ob URL und Token gesetzt und plausibel sind."""
+        if not self.base_url or not self.token:
             return False
-        if not self.token:
+        if "your-jira-server" in self.base_url.lower():
             return False
         return True
 
-    def _get_json(self, path: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        last_error: Optional[Exception] = None
+    def _headers(self) -> Dict[str, str]:
+        if self.auth_type == "basic":
+            return {"Accept": "application/json"}
+        return {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {self.token}",
+        }
+
+    def _get_json(
+        self, path: str, params: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        url = f"{self.base_url}{path}"
+        last_error: Optional[JiraError] = None
         for attempt in range(1, self.retry_attempts + 1):
             try:
-                response = self.session.get(
-                    f"{self.url}{path}", params=params, timeout=self.timeout
+                response = requests.get(
+                    url,
+                    headers=self._headers(),
+                    params=params,
+                    timeout=self.timeout,
+                    verify=self.verify_ssl,
                 )
-                if response.status_code in (401, 403):
+            except requests.RequestException as exc:
+                last_error = JiraError(f"Jira nicht erreichbar: {exc}")
+            else:
+                status = response.status_code
+                if status in (401, 403):
                     raise JiraError(
-                        f"Authentifizierung fehlgeschlagen (HTTP {response.status_code}). "
-                        "Bitte API-Token prüfen."
+                        f"Jira-Zugriff verweigert (HTTP {status}) – Token/Rechte prüfen.",
+                        status,
                     )
-                if response.status_code >= 400:
+                if status >= 500:
+                    last_error = JiraError(f"Jira-Serverfehler (HTTP {status})", status)
+                elif status >= 400:
                     raise JiraError(
-                        f"HTTP {response.status_code} bei {path}: {response.text[:200]}"
+                        f"Jira-Request fehlgeschlagen (HTTP {status}): {response.text[:200]}",
+                        status,
                     )
-                return response.json()
-            except JiraError:
-                raise
-            except (requests.RequestException, ValueError) as exc:
-                last_error = exc
-                LOGGER.warning(
-                    "Jira-Request fehlgeschlagen (Versuch %s/%s): %s",
-                    attempt,
-                    self.retry_attempts,
-                    exc,
-                )
-        raise JiraError(f"Jira-Request endgültig fehlgeschlagen: {last_error}")
+                else:
+                    try:
+                        return response.json()
+                    except ValueError as exc:
+                        raise JiraError("Ungültige JSON-Antwort von Jira.") from exc
 
-    # --------------------------------------------------------------- Abfragen
-    def _fetch_issues(self, jql: str) -> List[Dict[str, Any]]:
-        """Holt Issues mit Pagination.
+            if attempt < self.retry_attempts:
+                time.sleep(min(2 ** attempt, 10))
+        raise last_error or JiraError("Unbekannter Jira-Fehler.")
 
-        Bevorzugt den aktuellen Endpoint ``/rest/api/3/search/jql``
-        (``nextPageToken``) und fällt bei älteren Servern auf
-        ``/rest/api/3/search`` (``startAt``) zurück.
-        """
-        fields = ",".join(JIRA_FIELDS)
+    def _fetch_issues(
+        self, jql: str, fields: Optional[List[str]] = None
+    ) -> List[Dict[str, Any]]:
+        """Lädt Issues mit nextPageToken (neu) oder startAt (ältere Server)."""
+        selected = fields or DEFAULT_FIELDS
         try:
-            return self._fetch_with_token(jql, fields)
+            return self._fetch_issues_token(jql, selected)
         except JiraError as exc:
-            LOGGER.info("Neuer Such-Endpoint nicht verfügbar (%s) – Fallback.", exc)
-            return self._fetch_with_start_at(jql, fields)
+            if exc.status in (400, 404, 405, 410):
+                LOGGER.debug(
+                    "nextPageToken-Endpunkt nicht verfügbar (HTTP %s) – "
+                    "Fallback auf startAt.",
+                    exc.status,
+                )
+                return self._fetch_issues_start_at(jql, selected)
+            raise
 
-    def _fetch_with_token(self, jql: str, fields: str) -> List[Dict[str, Any]]:
+    def _fetch_issues_token(
+        self, jql: str, fields: List[str]
+    ) -> List[Dict[str, Any]]:
         issues: List[Dict[str, Any]] = []
         next_token: Optional[str] = None
         while len(issues) < self.max_results:
             params: Dict[str, Any] = {
                 "jql": jql,
                 "maxResults": min(100, self.max_results - len(issues)),
-                "fields": fields,
+                "fields": ",".join(fields),
             }
             if next_token:
                 params["nextPageToken"] = next_token
@@ -316,7 +376,9 @@ class JiraClient:
                 break
         return issues
 
-    def _fetch_with_start_at(self, jql: str, fields: str) -> List[Dict[str, Any]]:
+    def _fetch_issues_start_at(
+        self, jql: str, fields: List[str]
+    ) -> List[Dict[str, Any]]:
         issues: List[Dict[str, Any]] = []
         start_at = 0
         while len(issues) < self.max_results:
@@ -324,7 +386,7 @@ class JiraClient:
                 "jql": jql,
                 "startAt": start_at,
                 "maxResults": min(100, self.max_results - len(issues)),
-                "fields": fields,
+                "fields": ",".join(fields),
             }
             data = self._get_json("/rest/api/3/search", params)
             batch = data.get("issues", []) or []
@@ -335,30 +397,50 @@ class JiraClient:
                 break
         return issues
 
+    @staticmethod
+    def _get_priority(priority_name: str) -> str:
+        name = str(priority_name or "").strip()
+        return PRIORITY_ALIASES.get(name.lower(), name or "Medium")
+
+    @classmethod
+    def _issue_from_raw(cls, issue: Dict[str, Any]) -> JiraIssue:
+        fields = issue.get("fields", {}) or {}
+        return JiraIssue(
+            key=str(issue.get("key", "")),
+            issue_type=(fields.get("issuetype") or {}).get("name", "Task"),
+            status=(fields.get("status") or {}).get("name", ""),
+            priority=cls._get_priority((fields.get("priority") or {}).get("name", "")),
+            summary=fields.get("summary", "") or "",
+            description=adf_to_text(fields.get("description")).strip(),
+            reporter=(fields.get("reporter") or {}).get("displayName", ""),
+            assignee=(fields.get("assignee") or {}).get("displayName", ""),
+            created=fields.get("created", "") or "",
+            resolved=fields.get("resolutiondate", "") or "",
+            labels=list(fields.get("labels", []) or []),
+        )
+
     def search_tasks(self, prefix: Optional[str] = None) -> List[JiraIssue]:
         """Sucht Tasks im Projekt und filtert optional nach Key-Prefix."""
         prefix = prefix or str(self.config.get("filters", {}).get("prefix", "JRA-"))
         if not self.is_configured():
             LOGGER.warning(
-                "Jira ist nicht konfiguriert (server.url/api.token). "
-                "Es wird ein leerer Bericht erzeugt."
+                "Jira ist nicht konfiguriert (server.url/api.token) – "
+                "es werden keine Tasks geladen."
             )
             return []
 
-        jql = self.custom_jql or f'project = "{self.project_key}" ORDER BY created DESC'
-        try:
-            raw_issues = self._fetch_issues(jql)
-        except JiraError as exc:
-            LOGGER.error("Jira-Abfrage fehlgeschlagen: %s", exc)
-            return []
+        project = self.config.get("project", {})
+        jql = str(project.get("jql", "") or "").strip()
+        if not jql:
+            key = str(project.get("key", "JRA") or "JRA")
+            jql = f'project = "{key}" ORDER BY key ASC'
 
-        tasks: List[JiraIssue] = []
-        for issue in raw_issues:
-            task = self._issue_from_raw(issue)
-            if prefix and not task.key.upper().startswith(prefix.upper()):
-                continue
-            tasks.append(task)
-
+        tasks = [
+            self._issue_from_raw(issue)
+            for issue in self._fetch_issues(jql)
+        ]
+        if prefix:
+            tasks = [task for task in tasks if task.key.upper().startswith(prefix.upper())]
         LOGGER.info("%s Task(s) mit Prefix %s gefunden", len(tasks), prefix)
         return tasks
 
@@ -368,14 +450,9 @@ class JiraClient:
         batch_size: Optional[int] = None,
         batch_delay: Optional[float] = None,
     ) -> Dict[str, JiraIssue]:
-        """Lädt Jira-Details für konkrete Keys in Blöcken (max. 100).
-
-        Die Keys stammen aus der Verzeichnisstruktur. Dadurch werden nur
-        tatsächlich vorhandene Tasks abgefragt. Zwischen den Blöcken wird
-        eine konfigurierbare Pause eingelegt, um den Jira-Server zu schonen.
-        """
+        """Lädt Jira-Details für konkrete Keys in Blöcken (max. 100)."""
         unique_keys: List[str] = []
-        seen: set[str] = set()
+        seen: set = set()
         for key in keys:
             normalized = str(key).strip().upper()
             if normalized and normalized not in seen:
@@ -426,9 +503,7 @@ class JiraClient:
                     result[task.key.upper()] = task
 
             if delay and batch_index < total_batches:
-                LOGGER.debug(
-                    "Warte %.1f Sekunde(n) vor dem nächsten Jira-Batch", delay
-                )
+                LOGGER.debug("Warte %.1f Sekunde(n) vor dem nächsten Batch", delay)
                 time.sleep(delay)
 
         LOGGER.info(
@@ -436,67 +511,46 @@ class JiraClient:
         )
         return result
 
-    @staticmethod
-    def _issue_from_raw(issue: Dict[str, Any]) -> JiraIssue:
-        """Wandelt eine Jira-Rohantwort in ein ``JiraIssue`` um."""
-        fields = issue.get("fields", {}) or {}
-        return JiraIssue(
-            key=str(issue.get("key", "")),
-            issue_type=(fields.get("issuetype") or {}).get("name", "Task"),
-            status=(fields.get("status") or {}).get("name", ""),
-            priority=JiraClient._get_priority(
-                (fields.get("priority") or {}).get("name", "")
-            ),
-            summary=fields.get("summary", "") or "",
-            description=adf_to_text(fields.get("description")).strip(),
-            reporter=(fields.get("reporter") or {}).get("displayName", ""),
-            assignee=(fields.get("assignee") or {}).get("displayName", ""),
-            created=fields.get("created", "") or "",
-            resolved=fields.get("resolutiondate", "") or "",
-            labels=list(fields.get("labels", []) or []),
-        )
 
-    @staticmethod
-    def _get_priority(priority_name: str) -> str:
-        name = (priority_name or "").strip()
-        if not name:
-            return "Medium"
-        return PRIORITY_ALIASES.get(name.lower(), name)
-
-
+# ---------------------------------------------------------------------------
+# SQL-Scan
+# ---------------------------------------------------------------------------
 class ScriptScanner:
-    """Scannt SQL-Dateien und ordnet sie über die Verzeichnisstruktur zu.
+    """Findet SQL-Dateien und indexiert sie nach dem Jira-Task-Verzeichnis."""
 
-    Die Jira-Referenz ergibt sich aus dem Elternverzeichnis der SQL-Datei::
-
-        .../<Jahr>/<Abteilung>/<Auftraggeber>/<Jira-Task>/<name>.sql
-
-    Dadurch ist keine Referenz im Dateiinhalt nötig. Jede Datei wird genau
-    einmal gelesen und über den Task-Key indexiert.
-    """
-
-    KPI_PATTERN = re.compile(r"\b(kpi|dashboard|report|metric)\w*\b", re.IGNORECASE)
+    TABLE_PATTERN = re.compile(
+        r"\b(?:FROM|JOIN|INTO|UPDATE|DELETE\s+FROM)\s+([A-Za-z_][\w.$]*)",
+        re.IGNORECASE,
+    )
+    KPI_PATTERN = re.compile(
+        r"\b(?:kpi|dashboard|report|auswertung|umsatz|gewinn|marge|bestand|"
+        r"kunde|lieferant|monat|jahr)\w*",
+        re.IGNORECASE,
+    )
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config or load_config()
-        scripts_cfg = self.config.get("scripts", {})
-        self.base_path = resolve_path(scripts_cfg.get("base_path", ROOT / "scripts"))
-        self.extensions = list(scripts_cfg.get("extensions", [".sql"]))
-        self.include_subdirectories = bool(
-            scripts_cfg.get("include_subdirectories", True)
-        )
-        self.exclude = {str(name) for name in scripts_cfg.get("exclude", [])}
-        self._index: Optional[Dict[str, List[Dict[str, Any]]]] = None
+        scripts = self.config.get("scripts", {})
+        self.base_path = resolve_path(scripts.get("base_path", "scripts"))
+        self.extensions = [
+            str(ext).lower()
+            for ext in (scripts.get("extensions") or [".sql"])
+            if str(ext).strip()
+        ]
+        self.include_subdirectories = bool(scripts.get("include_subdirectories", True))
+        self.exclude = [str(item) for item in (scripts.get("exclude") or [])]
         self._scripts: List[Path] = []
+        self._index: Optional[Dict[str, List[Dict[str, Any]]]] = None
 
-    # ---------------------------------------------------------------- Dateien
     def find_scripts(self) -> List[Path]:
-        """Findet alle relevanten SQL-Dateien (ohne Duplikate)."""
+        """Liefert alle passenden SQL-Dateien (jede Datei genau einmal)."""
         if not self.base_path.exists():
-            LOGGER.warning("SQL-Pfad nicht gefunden: %s", self.base_path)
-            return []
+            LOGGER.warning("Scan-Root nicht gefunden: %s", self.base_path)
+            self._scripts = []
+            return self._scripts
 
         found: List[Path] = []
+        seen: set = set()
         for extension in self.extensions:
             pattern = f"*{extension}"
             iterator = (
@@ -505,14 +559,32 @@ class ScriptScanner:
                 else self.base_path.glob(pattern)
             )
             for path in iterator:
-                if not path.is_file():
+                if not path.is_file() or path in seen:
                     continue
-                if path.name in self.exclude:
+                relative = path.relative_to(self.base_path).as_posix()
+                if path.name in self.exclude or relative in self.exclude:
                     continue
-                if path not in found:
-                    found.append(path)
+                seen.add(path)
+                found.append(path)
         self._scripts = sorted(found)
         return self._scripts
+
+    @staticmethod
+    def _detect_technologies(content: str, suffix: str = ".sql") -> List[str]:
+        """Erkennt SQL-Technologien und grobe Dialekt-Hinweise."""
+        if suffix.lower() != ".sql":
+            return []
+        upper = content.upper()
+        technologies = {"SQL"}
+        if "PL/PGSQL" in upper or "LANGUAGE PLPGSQL" in upper:
+            technologies.add("PL/pgSQL")
+        if "NVARCHAR" in upper or "\nGO\n" in upper or "IDENTITY(" in upper:
+            technologies.add("T-SQL")
+        if "AUTO_INCREMENT" in upper or "ENGINE=INNODB" in upper:
+            technologies.add("MySQL")
+        if "ROWNUM" in upper or "CONNECT BY" in upper or "NVL(" in upper:
+            technologies.add("Oracle")
+        return sorted(technologies)
 
     def extract_script_info(self, script_path: Path) -> Dict[str, Any]:
         """Extrahiert Metadaten und den Task-Key aus dem Elternverzeichnis."""
@@ -526,6 +598,7 @@ class ScriptScanner:
             "task_dir": str(script_path.parent),
             "jira_refs": [],
             "technologies": [],
+            "tables": [],
             "kpi_reports": [],
             "error": "",
         }
@@ -553,44 +626,14 @@ class ScriptScanner:
 
         info["lines"] = len(content.splitlines())
         info["technologies"] = self._detect_technologies(content, script_path.suffix)
+        info["tables"] = sorted(
+            {match.upper() for match in self.TABLE_PATTERN.findall(content)}
+        )
         info["kpi_reports"] = sorted(
             {match.lower() for match in self.KPI_PATTERN.findall(content)}
         )
         return info
 
-    @staticmethod
-    def _detect_technologies(content: str, suffix: str = ".sql") -> List[str]:
-        """Erkennt Technologien. Für SQL-Dateien inkl. grober Dialekt-Hinweise."""
-        if suffix.lower() == ".sql":
-            technologies = {"SQL"}
-            upper = content.upper()
-            if "PL/PGSQL" in upper or "LANGUAGE PLPGSQL" in upper:
-                technologies.add("PL/pgSQL")
-            if "NVARCHAR" in upper or "\nGO\n" in upper:
-                technologies.add("T-SQL")
-            if "AUTO_INCREMENT" in upper or "ENGINE=" in upper:
-                technologies.add("MySQL")
-            if "VARCHAR2" in upper or "ROWNUM" in upper:
-                technologies.add("Oracle")
-            return sorted(technologies)
-
-        names: set[str] = set()
-        import_patterns = [
-            re.compile(r"^\s*import\s+([A-Za-z_][\w.]*)", re.MULTILINE),
-            re.compile(r"^\s*from\s+([A-Za-z_][\w.]*)\s+import\b", re.MULTILINE),
-            re.compile(r"""require\(\s*["']([^"']+)["']\s*\)"""),
-        ]
-        for pattern in import_patterns:
-            for match in pattern.findall(content):
-                root = match.split(".")[0].strip()
-                if root and not root.startswith((".", "/")):
-                    names.add(root)
-
-        stdlib = getattr(sys, "stdlib_module_names", frozenset())
-        builtin = set(sys.builtin_module_names)
-        return sorted(name for name in names if name not in stdlib and name not in builtin)
-
-    # ---------------------------------------------------------------- Matching
     def build_index(self) -> Dict[str, List[Dict[str, Any]]]:
         """Liest alle SQL-Dateien einmal und indexiert sie nach Task-Key."""
         index: Dict[str, List[Dict[str, Any]]] = {}
@@ -623,10 +666,13 @@ class ScriptScanner:
         return Path(matches[0]["path"]).parent
 
 
+# ---------------------------------------------------------------------------
+# Scan-Index
+# ---------------------------------------------------------------------------
 def scan_index_path(config: Dict[str, Any]) -> Path:
     """Pfad zur JSON-Ablage der Verzeichnis-/SQL-Inventur."""
     storage = config.get("storage", {})
-    value = storage.get("scan_index", ROOT / "inventory" / "scan_index.json")
+    value = storage.get("scan_index", "inventory/scan_index.json")
     return resolve_path(value)
 
 
@@ -634,12 +680,7 @@ def build_scan_index(
     scanner: ScriptScanner,
     index: Optional[Dict[str, List[Dict[str, Any]]]] = None,
 ) -> Dict[str, Any]:
-    """Erzeugt eine serialisierbare Beschreibung der Verzeichnisstruktur.
-
-    Das Ergebnis enthält pro Task-Key das Verzeichnis, den Pfadkontext
-    (Jahr/Abteilung/Auftraggeber) und alle gefundenen SQL-Dateien. Es dient
-    als Eingabe für die spätere Jira-Anreicherung (``--mode enrich``).
-    """
+    """Erzeugt eine serialisierbare Beschreibung der Verzeichnisstruktur."""
     task_index = index if index is not None else scanner.build_index()
     tasks: Dict[str, Any] = {}
     for task_key in sorted(task_index):
@@ -666,10 +707,7 @@ def save_scan_index(config: Dict[str, Any], data: Dict[str, Any]) -> Path:
     """Schreibt die Scan-Inventur als JSON."""
     path = scan_index_path(config)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     LOGGER.info("Scan-Index gespeichert: %s", path)
     return path
 
@@ -691,27 +729,57 @@ def load_scan_index(config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return data
 
 
+def filter_scan_data_by_prefix(
+    scan_data: Dict[str, Any], prefix: Optional[str]
+) -> Dict[str, Any]:
+    """Filtert die Inventur auf Task-Keys mit dem konfigurierten Prefix."""
+    if not prefix:
+        return scan_data
+
+    prefix_upper = prefix.upper()
+    all_tasks = scan_data.get("tasks", {})
+    kept = {
+        key: entry
+        for key, entry in all_tasks.items()
+        if key.upper().startswith(prefix_upper)
+    }
+    ignored = sorted(set(all_tasks) - set(kept))
+    if ignored:
+        LOGGER.info(
+            "%s Task(s) außerhalb des Prefix %s werden ignoriert: %s",
+            len(ignored),
+            prefix,
+            ", ".join(ignored),
+        )
+
+    filtered = dict(scan_data)
+    filtered["tasks"] = kept
+    filtered["task_count"] = len(kept)
+    filtered["file_count"] = sum(len(entry["files"]) for entry in kept.values())
+    return filtered
+
+
+# ---------------------------------------------------------------------------
+# Excel-Export
+# ---------------------------------------------------------------------------
 class ExcelExporter:
     """Erzeugt pro Jira-Task einen Excel-Bericht im Task-Verzeichnis."""
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config or load_config()
         excel_cfg = self.config.get("excel", {})
-        self.output_dir = resolve_path(excel_cfg.get("output_path", ROOT / "output"))
+        self.output_dir = resolve_path(excel_cfg.get("output_path", "output"))
         self.filename_pattern = str(excel_cfg.get("output_filename", "{JIRA}.xlsx"))
         self.fallback_pattern = str(
             excel_cfg.get("fallback_filename", "jira_report_{YYYY}_{MM}_{DD}.xlsx")
         )
+        self.include_csv = bool(excel_cfg.get("include_csv", False))
+        self.sheet_name = str(excel_cfg.get("sheet_name", "Jira-Task-Report"))
         self.datetime_format = str(
             excel_cfg.get("datetime_format", "%Y-%m-%d %H:%M:%S")
         )
-        self.include_csv = bool(excel_cfg.get("include_csv", False))
-        self.sheet_name = str(excel_cfg.get("sheet_name", "Jira-Task-Report"))
-        self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    @staticmethod
-    def _render_pattern(pattern: str, values: Dict[str, Any]) -> str:
-        """Ersetzt Platzhalter und entfernt unbekannte Platzhalter."""
+    def _render_pattern(self, pattern: str, values: Dict[str, Any]) -> str:
         now = datetime.now()
         merged: Dict[str, str] = {
             "YYYY": now.strftime("%Y"),
@@ -832,6 +900,7 @@ class ExcelExporter:
 
     def export_csv(self, data: List[Dict[str, Any]], path: Path) -> str:
         """Schreibt denselben Inhalt als UTF-8-CSV (Semikolon-getrennt)."""
+        path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8-sig", newline="") as handle:
             writer = csv.DictWriter(
                 handle,
@@ -841,24 +910,24 @@ class ExcelExporter:
             )
             writer.writeheader()
             for row in data:
-                writer.writerow(
-                    {title: row.get(title, "") for title, _width, _wrap in COLUMNS}
-                )
+                writer.writerow({key: row.get(key, "") for key in writer.fieldnames})
         return str(path)
 
     def export_simple(self, data: List[Dict[str, Any]]) -> str:
-        """Gibt die Tabelle für Debugging/--dry-run auf der Konsole aus."""
+        """Gibt die Tabelle auf der Konsole aus (Dry-Run)."""
+        titles = [title for title, _width, _wrap in COLUMNS]
+        print(" | ".join(titles))
         print("-" * 120)
         for row in data:
-            print(
-                " | ".join(
-                    str(row.get(title, ""))[:30] for title, _w, _wrap in COLUMNS
-                )
-            )
+            print(" | ".join(str(row.get(title, "")) for title in titles))
         print("-" * 120)
+        print(f"GESAMT: {len(data)}")
         return ""
 
 
+# ---------------------------------------------------------------------------
+# Zeilenaufbau
+# ---------------------------------------------------------------------------
 def build_rows_for_task(
     task: JiraIssue, matches: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
@@ -908,15 +977,10 @@ def build_rows_for_task(
 def build_scan_rows(
     task_key: str, matches: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
-    """Baut Zeilen ausschließlich aus Verzeichnisinformationen (ohne Jira).
-
-    Die Jira-Spalten bleiben leer und werden in ``--mode enrich`` ergänzt.
-    """
+    """Baut Zeilen ausschließlich aus Verzeichnisinformationen (ohne Jira)."""
     if not matches:
         row = empty_report_row(task_key)
-        row["Zusammenfassung-Anforderung"] = (
-            "Keine SQL-Datei im Task-Verzeichnis"
-        )
+        row["Zusammenfassung-Anforderung"] = "Keine SQL-Datei im Task-Verzeichnis"
         row["Status"] = "Pending"
         return [row]
 
@@ -984,52 +1048,19 @@ def empty_report_row(prefix: str = "JRA-") -> Dict[str, Any]:
     }
 
 
-def filter_scan_data_by_prefix(
-    scan_data: Dict[str, Any], prefix: Optional[str]
-) -> Dict[str, Any]:
-    """Filtert die Inventur auf Task-Keys mit dem konfigurierten Prefix."""
-    if not prefix:
-        return scan_data
-
-    prefix_upper = prefix.upper()
-    all_tasks = scan_data.get("tasks", {})
-    kept = {
-        key: entry
-        for key, entry in all_tasks.items()
-        if key.upper().startswith(prefix_upper)
-    }
-    ignored = sorted(set(all_tasks) - set(kept))
-    if ignored:
-        LOGGER.info(
-            "%s Task(s) außerhalb des Prefix %s werden ignoriert: %s",
-            len(ignored),
-            prefix,
-            ", ".join(ignored),
-        )
-
-    filtered = dict(scan_data)
-    filtered["tasks"] = kept
-    filtered["task_count"] = len(kept)
-    filtered["file_count"] = sum(len(entry["files"]) for entry in kept.values())
-    return filtered
-
-
+# ---------------------------------------------------------------------------
+# Phasen
+# ---------------------------------------------------------------------------
 def run_scan_phase(
     config: Dict[str, Any],
     exporter: ExcelExporter,
     dry_run: bool = False,
     prefix: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], List[str], List[Dict[str, Any]]]:
-    """Phase 1: Verzeichnisstruktur einlesen und Berichte soweit möglich bauen.
-
-    Es findet kein Jira-Zugriff statt. Die Jira-Spalten bleiben leer und
-    können später mit ``run_enrich_phase`` ergänzt werden.
-    """
+    """Phase 1: Verzeichnisstruktur einlesen und Berichte soweit möglich bauen."""
     scanner = ScriptScanner(config)
     index = scanner.build_index()
-    scan_data = filter_scan_data_by_prefix(
-        build_scan_index(scanner, index), prefix
-    )
+    scan_data = filter_scan_data_by_prefix(build_scan_index(scanner, index), prefix)
 
     written: List[str] = []
     rows_all: List[Dict[str, Any]] = []
@@ -1077,11 +1108,7 @@ def run_enrich_phase(
     batch_delay: Optional[float] = None,
     dry_run: bool = False,
 ) -> Tuple[List[str], List[Dict[str, Any]]]:
-    """Phase 2: Jira-Details für die gefundenen Task-Keys nachladen.
-
-    Die Keys werden in Blöcken von maximal 100 abgefragt. Zwischen den
-    Blöcken wird gemäß ``jira.batch_delay_seconds`` pausiert.
-    """
+    """Phase 2: Jira-Details für die gefundenen Task-Keys nachladen."""
     tasks = scan_data.get("tasks", {}) if scan_data else {}
     if not tasks:
         LOGGER.warning("Keine Tasks im Scan-Index – Anreicherung wird übersprungen.")
@@ -1133,6 +1160,9 @@ def run_enrich_phase(
     return written, rows_all
 
 
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 def main(argv: Optional[List[str]] = None) -> int:
     """CLI-Einstiegspunkt."""
     parser = argparse.ArgumentParser(
@@ -1265,4 +1295,4 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())

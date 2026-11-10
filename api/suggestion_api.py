@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Suggestion System API – FastAPI-Service für Requirements-Matching.
+"""FastAPI-Service für Task-, SQL- und Suggestion-Daten.
 
-Stellt Tasks, Script-Inventar, Suggestions und eine einfache Gap-Analyse
-unter dem Prefix ``/api`` bereit und liefert das Dashboard unter ``/`` aus.
+Der Service stellt die fachlichen Endpunkte unter ``/api`` bereit und liefert
+das Dashboard unter ``/`` aus. Er nutzt dieselbe Konfigurationsschicht und
+dieselben SQL-Analyseklassen wie die CLI, damit Dashboard und Scanner immer
+dieselben Daten sehen.
 
 Start:
     python -m api.suggestion_api
@@ -44,9 +46,9 @@ CONFIG = load_config()
 
 
 class JiraTask(BaseModel):
-    """Jira Task Model."""
+    """Jira-Task-Modell für die JSON-Ablage."""
 
-    key: str = Field(..., description="Task ID, z. B. JRA-345")
+    key: str = Field(..., description="Task-ID, z. B. JRA-345")
     summary: str = Field(..., description="Task-Zusammenfassung")
     description: str = Field(default="", description="Task-Beschreibung")
     status: str = Field(default="open", description="Aktueller Status")
@@ -59,22 +61,8 @@ class JiraTask(BaseModel):
     confluence_docs: List[str] = Field(default_factory=list)
 
 
-class ScriptImplementation(BaseModel):
-    """Implementation-Script Model."""
-
-    file_path: str
-    name: str
-    lines: int
-    size_bytes: int
-    jira_references: List[str] = Field(default_factory=list)
-    kpi_tags: List[str] = Field(default_factory=list)
-    database_connections: List[str] = Field(default_factory=list)
-    api_imports: List[str] = Field(default_factory=list)
-    complexity: int = 1
-
-
 class Suggestion(BaseModel):
-    """Suggestion Model."""
+    """Suggestion-Modell."""
 
     title: str = Field(..., min_length=1)
     description: str = Field(..., min_length=1)
@@ -85,7 +73,7 @@ class Suggestion(BaseModel):
 
 
 class GapAnalysis(BaseModel):
-    """Gap-Analyse-Ergebnis."""
+    """Ergebnis der einfachen Gap-Analyse."""
 
     task_key: str
     summary: str = ""
@@ -93,17 +81,6 @@ class GapAnalysis(BaseModel):
     implementation_path: Optional[str] = None
     missing_requirements: List[str] = Field(default_factory=list)
     completion_percentage: float = 0
-
-
-class Requirement(BaseModel):
-    """Requirement Model."""
-
-    id: str = ""
-    task_id: str
-    description: str
-    type: str = "functional"
-    acceptance_criteria: Optional[str] = None
-    priority: str = "medium"
 
 
 # --------------------------------------------------------------------------- Storage
@@ -138,6 +115,9 @@ class SuggestionStore:
 
     def list_suggestions(self) -> List[Dict[str, Any]]:
         return list(self.database.get("suggestions", []))
+
+    def list_tasks(self) -> List[Dict[str, Any]]:
+        return list(self.database.get("tasks", []))
 
     def add_suggestion(self, suggestion: Suggestion) -> Dict[str, Any]:
         entry = {
@@ -207,17 +187,11 @@ def extract_requirements(text: str) -> List[Dict[str, Any]]:
 
 
 def _script_path() -> Path:
-    return resolve_path(
-        CONFIG.get("scripts", {}).get("base_path", ROOT / "scripts")
-    )
+    return resolve_path(CONFIG.get("scripts", {}).get("base_path", ROOT / "scripts"))
 
 
 def _analyzer() -> ScriptAnalyzer:
-    scripts_cfg = CONFIG.get("scripts", {})
-    return ScriptAnalyzer(
-        extensions=scripts_cfg.get("extensions"),
-        exclude=scripts_cfg.get("exclude"),
-    )
+    return ScriptAnalyzer(CONFIG)
 
 
 def _cached_tasks() -> List[Dict[str, Any]]:
@@ -238,6 +212,18 @@ def _cached_tasks() -> List[Dict[str, Any]]:
     return []
 
 
+def _index_scripts(scripts: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    """Indexiert SQL-Inventar-Einträge nach Task-Key."""
+    index: Dict[str, List[Dict[str, Any]]] = {}
+    for script in scripts:
+        references = set(script.get("jira_refs", []))
+        if script.get("task_key"):
+            references.add(script["task_key"])
+        for reference in references:
+            index.setdefault(str(reference).upper(), []).append(script)
+    return index
+
+
 # --------------------------------------------------------------------------- App
 
 
@@ -250,7 +236,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="Jira Scanner API",
-    description="API für Task-Scanner, Script-Inventar und Requirements-Matching",
+    description="API für Task-Scanner, SQL-Inventar und Requirements-Matching",
     version="1.3.0",
     lifespan=lifespan,
 )
@@ -286,11 +272,12 @@ def get_tasks(
             config["project"] = {**config.get("project", {}), "jql": jql}
         tasks = JiraClient(config).search_tasks()
         return {
-            "tasks": [task.__dict__ for task in tasks],
+            "tasks": [task.to_dict() for task in tasks],
             "count": len(tasks),
             "source": "jira",
         }
-    tasks = _cached_tasks()
+
+    tasks = store.list_tasks() + _cached_tasks()
     return {"tasks": tasks, "count": len(tasks), "source": "cache"}
 
 
@@ -302,19 +289,19 @@ def create_task(task: JiraTask) -> Dict[str, Any]:
 
 @router.get("/scripts")
 def get_scripts(path: Optional[str] = None) -> Dict[str, Any]:
-    """Scannt das Script-Verzeichnis."""
+    """Scannt das SQL-Verzeichnis und liefert das Inventar."""
     target = resolve_path(path) if path else _script_path()
-    scripts = _analyzer().scan_directory(target)
+    scripts = _analyzer().analyze_directory(target)
     return {"scripts": scripts, "count": len(scripts), "path": str(target)}
 
 
 @router.post("/scripts/analyze")
 def analyze_script(path: str) -> Dict[str, Any]:
-    """Analysiert eine einzelne Script-Datei."""
+    """Analysiert eine einzelne SQL-Datei."""
     target = resolve_path(path)
     if not target.exists():
         raise HTTPException(status_code=404, detail=f"Datei nicht gefunden: {target}")
-    return {"script": _analyzer().analyze_file(target)}
+    return {"script": _analyzer().analyze(target)}
 
 
 @router.get("/suggestions")
@@ -339,14 +326,13 @@ def batch_create_suggestions(suggestions: List[Suggestion]) -> Dict[str, Any]:
 def analyze_gaps(
     task_keys: Optional[List[str]] = Query(default=None),
 ) -> Dict[str, Any]:
-    """Vergleicht Tasks mit vorhandenen Script-Implementierungen."""
-    scripts = _analyzer().scan_directory(_script_path())
-    index: Dict[str, List[Dict[str, Any]]] = {}
-    for script in scripts:
-        for reference in script.get("jira_refs", []):
-            index.setdefault(reference.upper(), []).append(script)
+    """Vergleicht Tasks mit vorhandenen SQL-Implementierungen."""
+    index = _index_scripts(_analyzer().analyze_directory(_script_path()))
 
-    keys = [key.upper() for key in (task_keys or [])] or sorted(index)
+    keys = [key.strip().upper() for key in (task_keys or []) if key.strip()]
+    if not keys:
+        keys = sorted(index)
+
     gaps: List[Dict[str, Any]] = []
     for key in keys:
         implementations = index.get(key, [])
@@ -371,16 +357,15 @@ def analyze_gaps(
 def match_requirements_and_implementation(
     task_key: str, script_path: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Prüft, ob ein Script den Task referenziert."""
-    scripts = _analyzer().scan_directory(_script_path())
-    candidates = [
-        script for script in scripts if task_key.upper() in script.get("jira_refs", [])
-    ]
+    """Prüft, ob eine SQL-Datei den Task referenziert."""
+    index = _index_scripts(_analyzer().analyze_directory(_script_path()))
+    candidates = index.get(task_key.strip().upper(), [])
     if script_path:
+        wanted = resolve_path(script_path)
         candidates = [
             script
             for script in candidates
-            if Path(script["path"]).resolve() == resolve_path(script_path)
+            if Path(script["path"]).resolve() == wanted
         ]
     return {
         "task": task_key,
