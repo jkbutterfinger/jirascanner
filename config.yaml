@@ -25,7 +25,7 @@ api:
 
 # Jira-Projekt
 project:
-  key: "JRA"               # Projektschlüssel; Task-Keys beginnen mit "JRA-"
+  key: "SAM1"              # Projektschlüssel; Task-Keys beginnen mit "SAM1-"
   name: "Jira Reporting"
   jql: ""                  # optional: eigene JQL (überschreibt project.key)
 
@@ -42,14 +42,14 @@ storage:
 #   <base_path>/<Jahr>/<Abteilung>/<Auftraggeber>/<Jira-Task>/<name>.sql
 # Der Jira-Task wird aus dem Elternverzeichnis der SQL-Datei abgeleitet.
 scripts:
-  base_path: "scripts"
+  base_path: "/home/user1/work/testfolder"
   extensions: [".sql"]
   include_subdirectories: true
   exclude: []
 
 # Task-Filter
 filters:
-  prefix: "JRA-"           # Key-Prefix (clientseitig geprüft)
+  prefix: "SAM1-"          # Key-Prefix (clientseitig geprüft)
   min_priority: "medium"
   statuses: ["open", "in progress", "done"]
   exclude_keywords: []
